@@ -29,6 +29,7 @@ from . import flow_api
 from . import flow_be
 from . import gemini_be
 from . import model_catalog
+from . import flow_models
 from .run_hours import in_run_hours, summarize_run_hours
 from .chrome_utils import (
     _chrome_alive_on_port, _chrome_running_for_profile, _kill_chrome_for_profile,
@@ -3388,6 +3389,77 @@ class SeleniumFlowWorker:
     # vậy không call site nào ngoài 3 hàm đó phải sửa.
     # ══════════════════════════════════════════════════════════════════════
     _BE_SESSION_TTL_SECS = 600      # token bl/f.sid/at dùng lại được trong 1 lần load trang
+    _FLOW_MODELS_TTL_SECS = 1800    # catalog model đổi rất hiếm — 30 phút là đủ
+    _FLOW_MODELS_FAIL_TTL_SECS = 300  # lấy hụt thì đừng thử lại mỗi task
+
+    def _flow_models_catalog(self, force: bool = False):
+        """Catalog model THẬT của tài khoản này (RPC `HTrJv`), CÓ CACHE.
+
+        Catalog là PER-ACCOUNT nên cache theo worker (1 worker = 1 profile =
+        1 tài khoản). RPC chỉ ĐỌC, không cần reCAPTCHA, không tốn quota —
+        nhưng vẫn cache vì nằm trên hot path generate.
+
+        Trả `None` khi không lấy được → caller tự lui về `model_catalog`
+        (bảng key cũ) thay vì chặn task."""
+        now = time.time()
+        c = getattr(self, '_flow_models_cache', None)
+        if c and not force:
+            ttl = (self._FLOW_MODELS_TTL_SECS if c.get('catalog')
+                   else self._FLOW_MODELS_FAIL_TTL_SECS)
+            if now - c.get('_at', 0) < ttl:
+                return c.get('catalog')
+        cat = None
+        try:
+            session = self._be_session()
+            if session:
+                raw = self._batchexecute_call('HTrJv', [], session, timeout=30)
+                if raw:
+                    cat = flow_models.parse_catalog(
+                        self._batchexecute_parse(raw, 'HTrJv'))
+        except Exception as e:
+            self._log('warn', f'Không đọc được catalog model (HTrJv): {e}')
+        if cat:
+            fams = [f['label'] for f in cat['video'] if f['enabled']]
+            self._log('info', f'Catalog model: {len(fams)} họ video dùng được '
+                              f'(hạng gói={cat.get("tier") or "?"}) — {", ".join(fams)}')
+        self._flow_models_cache = {'catalog': cat, '_at': now}
+        return cat
+
+    def _resolve_video_model_keys(self, task: dict, ingredient: bool, aspect: str):
+        """DANH SÁCH `videoModelKey` nên thử, khớp (nhãn model + tỉ lệ + thời
+        lượng), tốt nhất đứng đầu. Trả `(keys, note)`.
+
+        ⚠️ Ưu tiên catalog THẬT đọc lúc chạy. Bảng key cũ (`model_catalog`,
+        suy `t2v`→`r2v`) chỉ còn là DỰ PHÒNG vì nó SAI với họ Fast/Quality —
+        xem `flow_models` để biết chi tiết bug `RPC_ERROR_CODE_5`.
+
+        Trả NHIỀU ứng viên vì biến thể `_ultra` (hạng gói) KHÔNG suy được từ
+        catalog — phải thử mới biết, xem docstring `flow_models`."""
+        label = (task.get('model') or '').strip()
+        kind = flow_models.KIND_R2V if ingredient else flow_models.KIND_T2V
+        duration = flow_models.parse_duration(task.get('video_duration'))
+        cat = self._flow_models_catalog()
+        if cat and label:
+            keys, note = flow_models.resolve_candidates(
+                cat, label, kind, aspect, duration,
+                prefer_ultra=bool(getattr(self, '_flow_ultra_pref', False)))
+            if keys:
+                return keys, note
+            # Catalog nói RÕ là không làm được (họ không có mode đó) — vẫn thử
+            # bảng cũ, nhưng báo to để không âm thầm gửi key ảo.
+            self._log('warn', f'Catalog model không chọn được key cho '
+                              f'"{label}" ({kind}, {aspect}, {duration}s): {note}')
+        key, src = model_catalog.resolve_video_model(label, ingredient=ingredient)
+        return ([key] if key else []), src
+
+    # Mã lỗi Google trả khi key CÓ THẬT nhưng tài khoản không được dùng (sai
+    # biến thể hạng gói), hoặc key không tồn tại — cả hai đều đáng thử ứng
+    # viên kế tiếp, và đều bị chặn TRƯỚC khi sinh nội dung nên KHÔNG tốn quota.
+    _MODEL_RETRY_REASONS = ('MODEL_ACCESS_DENIED', 'RPC_ERROR_CODE_5', 'NOT_FOUND')
+
+    def _is_model_retry_error(self, exc) -> bool:
+        reason = getattr(exc, 'reason', '') or str(exc)
+        return any(r in reason for r in self._MODEL_RETRY_REASONS)
 
     def _be_generate_enabled(self) -> bool:
         """Công tắc `generate_via_batchexecute` (Cài đặt cục bộ).
@@ -3619,45 +3691,75 @@ class SeleniumFlowWorker:
                 self._be_note_fail('video', 'không lấy được session')
                 return None
             prompt = f'TASK_{task["id"]}:{task.get("prompt_text") or task.get("title") or ""}'
-            fresh = self._get_fresh_recaptcha('VIDEO_GENERATION') or captcha
-            if mode in ('imageToVideo', 'componentsToVideo'):
-                if not media_names:
-                    self._be_note_fail('video', f'mode={mode} chưa có ảnh tham chiếu nào')
-                    return None
-                model_key, model_src = model_catalog.resolve_video_model(
-                    task.get('model'), ingredient=True)
-                args = flow_be.build_ingredient_to_video_args(
-                    project_id, prompt, fresh, media_names,
-                    aspect_ratio=aspect, video_model_key=model_key)
-                rpc = flow_be.RPC_INGREDIENT_TO_VIDEO
-            else:
-                model_key, model_src = model_catalog.resolve_video_model(
-                    task.get('model'), ingredient=False)
-                args = flow_be.build_text_to_video_args(
-                    project_id, prompt, fresh,
-                    aspect_ratio=aspect, video_model_key=model_key)
-                rpc = flow_be.RPC_TEXT_TO_VIDEO
-            self._log('info', f'  Task #{task["id"]} model="{task.get("model") or ""}" '
-                              f'→ videoModelKey={model_key} (nguồn: {model_src})')
-            if model_src not in _MODEL_SRC_FROM_DB and (task.get('model') or '').strip():
+            ingredient = mode in ('imageToVideo', 'componentsToVideo')
+            if ingredient and not media_names:
+                self._be_note_fail('video', f'mode={mode} chưa có ảnh tham chiếu nào')
+                return None
+            rpc = (flow_be.RPC_INGREDIENT_TO_VIDEO if ingredient
+                   else flow_be.RPC_TEXT_TO_VIDEO)
+            model_keys, model_src = self._resolve_video_model_keys(
+                task, ingredient=ingredient, aspect=aspect)
+            if not model_keys:
+                self._be_note_fail('video', f'không chọn được model key: {model_src}')
+                return None
+            # Nguồn `catalog …` = đọc từ chính Google (chuẩn nhất, có khớp tỉ lệ
+            # + thời lượng) nên KHÔNG cảnh báo. Chỉ còn cảnh báo khi phải lui về
+            # bảng key cũ — nơi phép suy `t2v`→`r2v` SAI với họ Fast/Quality.
+            if (not model_src.startswith('catalog')
+                    and model_src not in _MODEL_SRC_FROM_DB
+                    and (task.get('model') or '').strip()):
                 self._log('warn', f'Task #{task["id"]} model="{task.get("model")}" — KHÔNG có '
                                   f'trong veo_models.model_key (backend), dùng {model_src}: '
-                                  f'videoModelKey={model_key}')
-            self._log('info', f'POST {rpc} (batchexecute) mode={mode}')
-            raw = self._batchexecute_call(rpc, args, session, timeout=180)
-            payload = self._batchexecute_parse(raw, rpc) if raw else None
-            if payload is None:
-                self._be_note_fail('video', f'payload rỗng — raw: {str(raw)[:200]}')
-                return None
-            info = flow_be.parse_video_workflow(payload)
-            if not info['workflowId'] and not info['mediaId']:
-                self._be_note_fail('video', f'không có workflow/media — {info["raw"]}')
-                return None
-            self._be_note_ok()
-            self._log('ok', f'✔ Đã submit {rpc} (batchexecute) — '
-                            f'workflowId=…{(info["workflowId"] or "")[-16:]} '
-                            f'mediaId={info["mediaId"] or "?"}')
-            return info
+                                  f'videoModelKey={model_keys[0]}')
+
+            # Thử lần lượt ứng viên: key bị từ chối vì SAI BIẾN THỂ hạng gói
+            # (`_ultra` hay không) bị Google chặn TRƯỚC khi sinh nội dung nên
+            # lần hụt KHÔNG tốn quota. Thành công thì NHỚ lại để task sau đi
+            # thẳng — xem docstring `flow_models` về việc hạng gói không suy
+            # được từ catalog.
+            last_err = None
+            for attempt, model_key in enumerate(model_keys, 1):
+                fresh = self._get_fresh_recaptcha('VIDEO_GENERATION') or captcha
+                if ingredient:
+                    args = flow_be.build_ingredient_to_video_args(
+                        project_id, prompt, fresh, media_names,
+                        aspect_ratio=aspect, video_model_key=model_key)
+                else:
+                    args = flow_be.build_text_to_video_args(
+                        project_id, prompt, fresh,
+                        aspect_ratio=aspect, video_model_key=model_key)
+                self._log('info', f'  Task #{task["id"]} model="{task.get("model") or ""}" '
+                                  f'→ videoModelKey={model_key} (nguồn: {model_src}'
+                                  + (f', thử {attempt}/{len(model_keys)}'
+                                     if len(model_keys) > 1 else '') + ')')
+                self._log('info', f'POST {rpc} (batchexecute) mode={mode}')
+                try:
+                    raw = self._batchexecute_call(rpc, args, session, timeout=180)
+                    payload = self._batchexecute_parse(raw, rpc) if raw else None
+                except Exception as e:
+                    last_err = e
+                    if self._is_model_retry_error(e) and attempt < len(model_keys):
+                        self._log('warn', f'  model "{model_key}" không dùng được '
+                                          f'({getattr(e, "reason", e)}) — thử ứng viên kế')
+                        continue
+                    raise
+                if payload is None:
+                    self._be_note_fail('video', f'payload rỗng — raw: {str(raw)[:200]}')
+                    return None
+                info = flow_be.parse_video_workflow(payload)
+                if not info['workflowId'] and not info['mediaId']:
+                    self._be_note_fail('video', f'không có workflow/media — {info["raw"]}')
+                    return None
+                # Nhớ biến thể dùng được cho các task sau của CÙNG tài khoản
+                self._flow_ultra_pref = '_ultra' in model_key
+                self._be_note_ok()
+                self._log('ok', f'✔ Đã submit {rpc} (batchexecute) — '
+                                f'workflowId=…{(info["workflowId"] or "")[-16:]} '
+                                f'mediaId={info["mediaId"] or "?"}')
+                return info
+            if last_err:
+                raise last_err
+            return None
         except Exception as e:
             self._be_note_fail('video', e)
             return None
