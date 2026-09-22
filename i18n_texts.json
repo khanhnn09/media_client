@@ -1,0 +1,57 @@
+{
+  "imageTab": [
+    "Hình ảnh",
+    "Images"
+  ],
+  "searchPlaceholder": [
+    "Tìm kiếm thành phần",
+    "Search assets"
+  ],
+  "addToPrompt": [
+    "Thêm vào câu lệnh",
+    "Add to Prompt"
+  ],
+  "newProject": [
+    "Dự án mới",
+    "New project"
+  ],
+  "createWithFlow": [
+    "Tạo trong Google Flow",
+    "Create with Google Flow"
+  ],
+  "googleSignIn": [
+    "Đăng nhập",
+    "Sign in"
+  ],
+  "geminiCreateVideo": [
+    "Tạo video",
+    "Create video"
+  ],
+  "geminiDeselectVideo": [
+    "Bỏ chọn Video",
+    "Deselect Videos"
+  ],
+  "geminiCreateImage": [
+    "Tạo hình ảnh",
+    "Create images",
+    "Create image"
+  ],
+  "geminiDeselectImage": [
+    "Bỏ chọn Hình ảnh",
+    "Bỏ chọn hình ảnh",
+    "Deselect images",
+    "Deselect Images"
+  ],
+  "geminiAspectRatioPrefix": [
+    "Tỷ lệ khung hình",
+    "Aspect ratio"
+  ],
+  "geminiRatioHorizontal": [
+    "Ngang",
+    "Landscape"
+  ],
+  "geminiRatioVertical": [
+    "Dọc",
+    "Portrait"
+  ]
+}

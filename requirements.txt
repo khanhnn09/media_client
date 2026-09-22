@@ -1,0 +1,39 @@
+# client_tool/requirements.txt — cài bằng start.bat (tự động) hoặc thủ công:
+#   pip install -r requirements.txt
+
+# ── App chính (main.py + server/) ──────────────────────────────────────────────
+# (2026-07-17) KHÔNG còn PyMySQL — client_tool không kết nối DB trực tiếp nữa, mọi
+# thao tác CRUD profile/extension/log đều qua HTTP API của backend (FLOW_API_URL).
+PyQt6>=6.6.0
+Flask>=3.0.0
+flask-cors>=4.0.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+# (2026-08-23) Nâng lên bản mới nhất trên PyPI tại thời điểm này. LƯU Ý:
+# `undetected-chromedriver` (3.5.5, phát hành 02/2024) và `selenium-stealth`
+# (1.0.6, phát hành 2020) ĐÃ LÀ BẢN MỚI NHẤT — upstream không ra bản mới nữa,
+# KHÔNG phải bị ghim cũ. Đã verify THẬT sau khi nâng Selenium lên 4.47:
+# `uc.Chrome()` vẫn mở Chrome thật + đọc DOM bình thường (rủi ro lớn nhất, vì
+# uc vá nội bộ Selenium mà cách nhau ~2.5 năm phát hành).
+selenium>=4.47.0
+undetected-chromedriver>=3.5.5
+selenium-stealth>=1.0.6
+# psutil (2026-07-20) — dùng bởi server/reset_guard.py để tìm + kill process
+# (và toàn bộ Chrome/chromedriver con của nó) còn giữ port 13445 từ lần chạy
+# trước, tự dọn sạch ngay lúc khởi động thay vì bắt user tự vào Task Manager.
+psutil>=5.9.0
+# setuptools (2026-07-18) — BẮT BUỘC trên Python 3.12+: distutils bị xoá khỏi
+# thư viện chuẩn (PEP 632), venv của Python 3.12+ KHÔNG còn tự cài setuptools
+# kèm theo nữa — undetected-chromedriver vẫn `from distutils.version import
+# LooseVersion` (chưa cập nhật theo kịp), thiếu setuptools sẽ crash ngay lúc
+# import với `ModuleNotFoicondError: No module named 'distutils'`. setuptools
+# cài shim (_distutils_hack, qua .pth file) tự động làm `import distutils`
+# hoạt động lại bình thường trên Python mới, không cần sửa gì thêm trong code.
+setuptools>=69.0.0
+
+# ── tests/ (không bắt buộc để chạy app, chỉ cần khi chạy pytest) ───────────────
+pytest>=7.4.0
+pytest-timeout>=2.2.0
+Pillow>=10.0.0
+curl_cffi>=0.16.1
+PySocks>=1.7.1

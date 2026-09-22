@@ -1,0 +1,18 @@
+# ── Secrets — KHÔNG BAO GIỜ commit ──
+.env
+local_settings.json
+client_identity.json
+auth_session.json
+data/
+tests/
+venv/
+video_tmp/
+logs/
+uploaded_media_cache.json
+flow_media_index.json
+flow_media_index.json.tmp
+
+# ── Python ──
+__pycache__
+*.pyc
+.pytest_cache
