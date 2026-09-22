@@ -123,7 +123,14 @@ class ProfileDialog(QDialog):
         # KHÔNG có toggle UI, chỉ sửa được qua PATCH API thủ công. TẮT → profile
         # bị chặn cả auto-scale LẪN bấm Start thủ công (xem routes.py/dispatcher.py
         # _start_worker) — dùng để tạm ngưng 1 profile cụ thể mà không cần xoá.
-        self._enabled_chk = QCheckBox('Bật — cho phép chạy (auto-scale + Start thủ công)')
+        # ⚠️ Text NGẮN — QCheckBox không tự xuống dòng/thu gọn, nhãn dài bắt
+        # QFormLayout nới cột field cho vừa nó (đo được 612px so với vùng cuộn
+        # chỉ 410px) khiến MỌI hàng khác bị kéo giãn theo, trong đó lưới 24 ô
+        # khung giờ giãn ra tới mức mấy giờ cuối văng khỏi vùng nhìn thấy.
+        # Chi tiết dài chuyển hết vào tooltip.
+        self._enabled_chk = QCheckBox('Bật — cho phép chạy')
+        self._enabled_chk.setToolTip('Cho phép auto-scale tự mở VÀ bấm Start thủ công.\n'
+                                     'Tắt = tạm ngưng profile này mà không cần xoá.')
         self._enabled_chk.setChecked(bool(self._p.get('enabled', 1)) if self._p else True)
 
         # ── Loại profile: VEO3 (Flow Automation), Gemini (chat + video), ChatGPT
@@ -139,6 +146,12 @@ class ProfileDialog(QDialog):
         cur_worker_mode = self._p.get('worker_mode', 'api') if self._p else 'api'
         self._type = QComboBox()
         self._type.setFixedHeight(38)
+        # Mặc định QComboBox đòi bề rộng đủ chứa MỤC DÀI NHẤT (đo được 474px) —
+        # cùng lý do với checkbox ở trên, nó nới cột field và kéo giãn lưới khung
+        # giờ. Giới hạn bề rộng yêu cầu; danh sách bung ra vẫn hiện đủ chữ.
+        self._type.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self._type.setMinimumContentsLength(18)
         self._type.addItem('VEO3 — Flow Automation (ảnh/video)',     'veo3')
         self._type.addItem('Gemini — Chat + upload video',           'gemini')
         self._type.addItem('ChatGPT — Chat + upload ảnh',            'chatgpt')
@@ -151,6 +164,9 @@ class ProfileDialog(QDialog):
         # — Option riêng của VEO3 —
         self._task_mode = QComboBox()
         self._task_mode.setFixedHeight(38)
+        self._task_mode.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self._task_mode.setMinimumContentsLength(18)
         self._task_mode.addItem('all',         'all')
         self._task_mode.addItem('image_only — Chỉ Ảnh', 'image_only')
         self._task_mode.addItem('video_only — Chỉ Video', 'video_only')
@@ -192,19 +208,41 @@ class ProfileDialog(QDialog):
         self._hour_checks: list[QCheckBox] = []
         for h in range(24):
             cb = QCheckBox(f'{h}')
+            # Ép bề rộng: để tự do thì mỗi cột lưới đòi ~48px (tổng 308px) —
+            # rộng hơn chỗ còn lại trong dialog 480px nên cột cuối (giờ 5/11/
+            # 17/23) bị cắt. 40px đủ cho ô tick + 2 chữ số.
+            cb.setFixedWidth(40)
             cb.setToolTip(f'Nhận task trong khoảng {h}:00 – {h}:59')
             cb.setChecked(h in saved_hours)
             cb.toggled.connect(self._update_run_hours_hint)
             rh_grid.addWidget(cb, h // 6, h % 6)
             self._hour_checks.append(cb)
-        rh_lay.addLayout(rh_grid)
+        # ⚠️ Bọc lưới trong HBox + addStretch: QFormLayout cho cột field rộng
+        # bằng hàng RỘNG NHẤT của cả form, nếu thả lưới trực tiếp thì 6 cột tự
+        # giãn ra lấp hết bề rộng đó và mấy ô giờ cuối trôi khỏi vùng nhìn thấy.
+        # Có stretch thì lưới luôn giữ đúng bề rộng tự nhiên (~308px), miễn
+        # nhiễm với việc sau này có hàng nào khác lại nới cột ra.
+        rh_grid_row = QHBoxLayout()
+        rh_grid_row.setContentsMargins(0, 0, 0, 0)
+        rh_grid_row.addLayout(rh_grid)
+        # ⚠️ PHẢI truyền hệ số 1: `addStretch()` mặc định là 0, lúc đó khoảng dư
+        # bị CHIA cho cả lưới (ô checkbox có sizePolicy co giãn được) nên mỗi ô
+        # phình từ 36px lên 48px và lưới lại tràn. Hệ số 1 cho spacer giành trọn
+        # phần dư, lưới giữ đúng bề rộng tự nhiên.
+        rh_grid_row.addStretch(1)
+        rh_lay.addLayout(rh_grid_row)
         rh_btns = QHBoxLayout()
         rh_btns.setSpacing(6)
         for text, fn in (('Chọn hết', lambda: self._set_all_hours(True)),
                          ('Bỏ hết', lambda: self._set_all_hours(False)),
-                         ('Giờ hành chính 8-17h', lambda: self._set_hours(range(8, 17)))):
+                         ('8-17h', lambda: self._set_hours(range(8, 17)))):
             b = QPushButton(text)
             b.setFixedHeight(24)
+            # Padding mặc định của QSS làm 3 nút cộng lại ~308px, tự nó nới cột
+            # field rộng hơn vùng cuộn. Thu gọn riêng nhóm nút phụ trợ này.
+            b.setStyleSheet('padding:2px 8px;')
+            if text == '8-17h':
+                b.setToolTip('Chọn nhanh giờ hành chính 8:00 – 17:00')
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.clicked.connect(fn)
             rh_btns.addWidget(b)
@@ -212,6 +250,14 @@ class ProfileDialog(QDialog):
         rh_lay.addLayout(rh_btns)
         self._run_hours_hint = QLabel()
         self._run_hours_hint.setStyleSheet(f'color:{C["muted"]}; font-size:11px;')
+        # ⚠️ PHẢI cho xuống dòng: tick xen kẽ (0,2,4,…) cho chuỗi tới ~84 ký tự
+        # ("0-1h, 2-3h, 4-5h, …"). QLabel 1 dòng có sizeHint rộng hơn cả dialog
+        # (cố định 480px) nên nó kéo giãn cột field, đẩy lưới 24 ô khung giờ
+        # tràn ra ngoài vùng nhìn thấy — bug thật user báo 2026-09-22.
+        # `setMinimumWidth(1)` để minimumSizeHint của label không tự đặt sàn
+        # rộng theo nội dung, nếu không wrap vẫn bị bỏ qua khi layout chật.
+        self._run_hours_hint.setWordWrap(True)
+        self._run_hours_hint.setMinimumWidth(1)
         rh_lay.addWidget(self._run_hours_hint)
         self._update_run_hours_hint()
 
@@ -387,6 +433,10 @@ class ProfileDialog(QDialog):
         self._run_hours_hint.setText(
             f'Chỉ nhận task: {span} (giờ máy này)' if span
             else 'Không chọn giờ nào (hoặc chọn đủ 24h) = chạy liên tục')
+        # Label đã bật wordWrap nên tick thêm/bớt giờ có thể làm nó nhảy 1↔2
+        # dòng — dialog phải tính lại chiều cao, không thì cuộn oan hoặc thừa
+        # khoảng trống. `_fit_height()` tự no-op trước khi dialog dựng xong.
+        self._fit_height()
 
     def _on_type_change(self, *_):
         """Ẩn/hiện option riêng của từng loại (VEO3 / Gemini / ChatGPT) — cả field
