@@ -4,13 +4,22 @@ local_settings.json
 client_identity.json
 auth_session.json
 data/
-tests/
 venv/
 video_tmp/
+media_output/
 logs/
 uploaded_media_cache.json
 flow_media_index.json
 flow_media_index.json.tmp
+
+# ── Chỉ dùng khi phát triển — repo này là bản production cho máy worker ──
+tests/
+conftest.py
+pytest.ini
+CLAUDE.md
+CHANGELOG.md
+docs/
+.claude/
 
 # ── Python ──
 __pycache__
