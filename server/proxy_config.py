@@ -28,9 +28,11 @@ KHÔNG dùng chung 1 thư mục nếu không profile mở sau sẽ ghi đè cred
 đang chạy) rồi nạp qua `--load-extension` — nạp KỂ CẢ khi `load_extensions=False`
 (cờ đó chỉ để tắt extension Flow, không liên quan proxy).
 
-⚠️ SOCKS4/SOCKS5: Chrome KHÔNG hỗ trợ xác thực SOCKS ở bất kỳ dạng nào (kể cả
-extension) — proxy SOCKS phải whitelist IP. Có credentials + SOCKS sẽ log
-warning rõ ràng thay vì im lặng chạy sai.
+⚠️ SOCKS5 CÓ user/pass (2026-09-23): Chrome KHÔNG xác thực được SOCKS ở bất kỳ
+dạng nào (kể cả extension) → trỏ Chrome vào 1 relay SOCKS5 không mật khẩu trên
+127.0.0.1, relay tự xác thực với proxy thật (`socks_relay.py`). Dạng
+`IP:PORT:USER:PASS` không ghi scheme thì DÒ thật xem là SOCKS5 hay HTTP
+(`detect_scheme()`), không còn đoán cứng 'http'. SOCKS4 vẫn không có auth.
 """
 
 import json
@@ -38,6 +40,10 @@ import re
 from pathlib import Path
 
 from .config import _this_dir, log
+from .socks_relay import detect_scheme, ensure_socks5_relay
+
+# (host, port) -> scheme dò được, để không dò lại mỗi lần mở Chrome.
+_detected_schemes = {}
 
 # Thư mục gốc chứa extension proxy-auth TỰ SINH (mỗi profile 1 thư mục con).
 # LUÔN dùng `_this_dir` (= client_tool/) chứ KHÔNG phải `_ROOT` — `_ROOT` trỏ LÊN
@@ -47,7 +53,6 @@ PROXY_EXT_ROOT = Path(_this_dir) / 'data' / 'proxy_auth_ext'
 
 # Scheme Chrome chấp nhận cho --proxy-server.
 _VALID_SCHEMES = ('http', 'https', 'socks4', 'socks5')
-_SOCKS_SCHEMES = ('socks4', 'socks5')
 
 # Không cho proxy đụng vào localhost — client_tool nói chuyện với chính nó
 # (server nhúng cổng 13445) và backend nội bộ; vòng qua proxy là vô nghĩa và
@@ -76,9 +81,11 @@ def parse_proxy(raw: str):
         return None
 
     scheme = 'http'
+    explicit_scheme = False
     m = _SCHEME_RE.match(raw)
     if m:
         scheme = m.group(1).lower()
+        explicit_scheme = True
         rest = m.group(2)
     else:
         rest = raw
@@ -132,6 +139,8 @@ def parse_proxy(raw: str):
         'password': password,
         'server':   server,
         'display':  display,
+        # Không ghi scheme → 'http' chỉ là đoán; build_proxy_setup() sẽ dò lại.
+        'explicit_scheme': explicit_scheme,
     }
 
 
@@ -201,23 +210,46 @@ def build_proxy_setup(proxy: str, profile_id=None) -> dict:
         if not info:
             return empty
 
-        args = [
-            f'--proxy-server={info["server"]}',
-            f'--proxy-bypass-list={DEFAULT_BYPASS_LIST}',
-        ]
+        # Không ghi scheme mà có user/pass (dạng IP:PORT:USER:PASS) → dò thật xem
+        # là SOCKS5 hay HTTP. Đoán bừa 'http' cho proxy SOCKS5 = Chrome mất mạng
+        # hoàn toàn (bug thật 2026-09-23). Kết quả dò được cache theo host:port.
+        if info['username'] and not info['explicit_scheme']:
+            key = (info['host'], info['port'])
+            if key not in _detected_schemes:
+                _detected_schemes[key] = detect_scheme(
+                    info['host'], info['port'], info['username'], info['password'])
+            if _detected_schemes[key] != info['scheme']:
+                info['scheme'] = _detected_schemes[key]
+                log.info(f'[proxy] Dò được proxy {info["host"]}:{info["port"]} là '
+                         f'{info["scheme"].upper()}')
 
+        hostport = f'{info["host"]}:{info["port"]}' if info['port'] else info['host']
+        server = f'{info["scheme"]}://{hostport}'
         ext_paths = []
+        display = f'{info["scheme"]}://{info["username"]}:******@{hostport}'             if info['username'] else server
+
         if info['username']:
-            if info['scheme'] in _SOCKS_SCHEMES:
-                log.warning(f'[proxy] {info["scheme"].upper()} KHÔNG hỗ trợ xác thực '
-                            f'user/pass trên Chrome — proxy này phải whitelist IP. '
-                            f'Bỏ qua phần credentials.')
+            if info['scheme'] == 'socks5':
+                # Chrome không xác thực được SOCKS → trỏ vào relay cục bộ không
+                # mật khẩu, relay tự xác thực với proxy thật (xem socks_relay.py).
+                local_port = ensure_socks5_relay(
+                    info['host'], info['port'], info['username'], info['password'])
+                server = f'socks5://127.0.0.1:{local_port}'
+                display += f' (qua relay 127.0.0.1:{local_port})'
+            elif info['scheme'] == 'socks4':
+                log.warning('[proxy] SOCKS4 KHÔNG hỗ trợ user/pass — proxy này phải '
+                            'whitelist IP. Bỏ qua phần credentials.')
             else:
                 p = ensure_proxy_auth_extension(info['username'], info['password'], profile_id)
                 if p:
                     ext_paths.append(p)
 
-        return {'args': args, 'ext_paths': ext_paths, 'display': info['display']}
+        args = [
+            f'--proxy-server={server}',
+            f'--proxy-bypass-list={DEFAULT_BYPASS_LIST}',
+        ]
+
+        return {'args': args, 'ext_paths': ext_paths, 'display': display}
     except Exception as e:
         log.warning(f'[proxy] Lỗi khi dựng cấu hình proxy: {e}')
         return empty
