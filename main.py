@@ -36,7 +36,33 @@ from gui.main_window import MainWindow
 load_dotenv()  # đọc client_tool/.env (python-dotenv tự tìm .env gần nhất, xem .env.example)
 
 
+def _disable_console_quickedit():
+    """Tắt QuickEdit mode của cửa sổ cmd (2026-09-23).
+
+    Bug user báo: "scroll trong cmd thì tự động tắt kết nối với server". Khi
+    QuickEdit bật (mặc định Windows), click/bôi chọn trong cmd khiến console
+    NGỪNG đọc output — mọi lệnh ghi stdout/stderr (log của Flask/worker) bị
+    BLOCK tới khi bấm Esc/Enter. Server embedded chạy chung process nên đứng
+    theo, GUI báo "Server offline". Tắt QuickEdit thì cuộn/click không còn
+    đóng băng process (vẫn bôi chọn được qua menu chuột phải → Mark)."""
+    if sys.platform != 'win32':
+        return
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        h_in = kernel32.GetStdHandle(-10)          # STD_INPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if not kernel32.GetConsoleMode(h_in, ctypes.byref(mode)):
+            return                                  # không chạy trong console (pythonw/IDE)
+        ENABLE_QUICK_EDIT_MODE = 0x0040
+        ENABLE_EXTENDED_FLAGS = 0x0080
+        kernel32.SetConsoleMode(h_in, (mode.value & ~ENABLE_QUICK_EDIT_MODE) | ENABLE_EXTENDED_FLAGS)
+    except Exception:
+        pass
+
+
 def main():
+    _disable_console_quickedit()
     app = QApplication(sys.argv)
     app.setApplicationName('Selenium Manager')
     app.setStyle('Fusion')
