@@ -174,6 +174,27 @@ def stop_worker_ep(pid):
     return jsonify({'ok': True})
 
 
+@app.route('/api/selenium/profiles/<int:pid>/clear_sleep', methods=['POST'])
+def clear_sleep_ep(pid):
+    """Xoá thời gian ngủ (2026-09-23) — đánh thức NGAY profile đang 'sleeping'
+    thay vì chờ hết `error_sleep_secs`. Còn trong _desired_veo3 (VEO3 đang muốn
+    chạy) → về 'waiting' để dispatcher cấp slot lại ngay; ngoài ra → 'idle'
+    (auto-scale tự mở lại khi có backlog)."""
+    profile = pm.get(pid)
+    if not profile:
+        return jsonify({'error': 'not found'}), 404
+    had_timer = _sleep_until_by_pid.pop(pid, None) is not None
+    if profile.get('status') != 'sleeping' and not had_timer:
+        return jsonify({'error': 'Profile không ở trạng thái ngủ'}), 409
+    if pid not in _workers:
+        new_status = 'waiting' if pid in _desired_veo3 else 'idle'
+        pm.set_status(pid, new_status, clear_task=True, pid=None)
+    _profile_log(pid, 'info', '⏰ Đã xoá thời gian ngủ thủ công — đánh thức profile')
+    if pid in _desired_veo3:
+        _veo3_dispatcher_tick()
+    return jsonify({'ok': True})
+
+
 @app.route('/api/selenium/profiles/<int:pid>/open', methods=['POST'])
 def open_browser(pid):
     """Mở Chrome với profile này để đăng nhập Google — không chạy task."""

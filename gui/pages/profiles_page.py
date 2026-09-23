@@ -523,6 +523,15 @@ class ProfilesPage(QWidget):
         act_edit.triggered.connect(lambda _, pp=p: self._edit(pp))
         menu.addAction(act_edit)
 
+        # Xoá thời gian ngủ (2026-09-23) — chỉ bấm được khi profile đang ngủ.
+        act_wake = QAction('⏰  Xóa thời gian ngủ (đánh thức ngay)', menu)
+        is_sleeping = p.get('status') == 'sleeping' or bool(p.get('sleepUntil'))
+        act_wake.setEnabled(is_sleeping)
+        if not is_sleeping:
+            act_wake.setToolTip('Profile không ở trạng thái ngủ')
+        act_wake.triggered.connect(lambda _, i=pid: self._clear_sleep(i))
+        menu.addAction(act_wake)
+
         menu.addSeparator()
 
         # "Làm mới profile (trắng)" (2026-08-10 — bắt đầu từ yêu cầu "thêm xóa
@@ -596,6 +605,10 @@ class ProfilesPage(QWidget):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
         ) != QMessageBox.StandardButton.Yes: return
         api('POST', f'/api/selenium/profiles/{pid}/clear_data',
+            on_done=lambda r: self._chk(r) or self.refresh())
+
+    def _clear_sleep(self, pid: int):
+        api('POST', f'/api/selenium/profiles/{pid}/clear_sleep',
             on_done=lambda r: self._chk(r) or self.refresh())
 
     def _toggle_auto(self, pid: int, current: bool):
