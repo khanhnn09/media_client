@@ -19,6 +19,7 @@ except ImportError:
     HAS_CFFI = False
     cf_requests = None
 
+from .proxy_config import build_proxy_setup
 from .config import FLOW_SERVER, POLL_INTERVAL, _IS_ARM, req_lib, _profile_log, VIDEO_TMP_DIR
 from .local_settings import get_local_settings
 from .i18n_texts import get_i18n_texts
@@ -235,6 +236,62 @@ TOGGLE_MATCH_JS = """
 # execute_async_script: callback `done` LUÔN là arguments[arguments.length-1],
 # KHÔNG phải arguments[0] (bug thật 2026-08-12: worker cũ gán done=arguments[0]
 # → siteKey bị hiểu thành 'VIDEO_GENERATION' → "Invalid site key ... VIDEO_GENERATION").
+# (2026-09-23) BẪY reCAPTCHA của Flow — bundle có hàm `x2a` (bật bằng cờ
+# `enable_recaptcha_execute_closure_wrap`): sau `grecaptcha.enterprise.ready()`,
+# trang CẤT bản `execute` gốc vào closure riêng rồi THAY hàm công khai bằng
+#   c.execute = (e,f) => d(e, Object.assign({}, f, {action:"extension_hijack_detected"}))
+# ⇒ mọi lời gọi từ bên ngoài (tool) ra token action `extension_hijack_detected`
+# thay vì `VIDEO_GENERATION` → Google trả `PUBLIC_ERROR_UNUSUAL_ACTIVITY`, trong
+# khi bấm tay (trang dùng bản gốc) vẫn chạy. Script này chạy TRƯỚC mọi script
+# của trang (`Page.addScriptToEvaluateOnNewDocument`), bọc setter của
+# `window.grecaptcha` → `.enterprise` → `.execute` để giữ lại bản GỐC vào
+# `window.__rcOrigExecute` trước khi trang kịp thay bằng bẫy.
+RECAPTCHA_GUARD_JS = r"""
+(function () {
+  if (window.__rcKeepHook) return;
+  window.__rcKeepHook = true;
+  function guardEnterprise(ent) {
+    if (!ent || ent.__rcGuarded) return;
+    var cur = ent.execute;
+    if (typeof cur === 'function' && !window.__rcOrigExecute) window.__rcOrigExecute = cur.bind(ent);
+    try {
+      Object.defineProperty(ent, 'execute', {
+        configurable: true, enumerable: true,
+        get: function () { return cur; },
+        set: function (v) {
+          if (typeof cur === 'function' && !window.__rcOrigExecute) window.__rcOrigExecute = cur.bind(ent);
+          if (typeof v === 'function' && !window.__rcOrigExecute) window.__rcOrigExecute = v.bind(ent);
+          cur = v;
+        }
+      });
+      ent.__rcGuarded = true;
+    } catch (e) {}
+  }
+  function guardRoot(g) {
+    if (!g || g.__rcRootGuarded) return;
+    var ent = g.enterprise;
+    try {
+      Object.defineProperty(g, 'enterprise', {
+        configurable: true, enumerable: true,
+        get: function () { return ent; },
+        set: function (v) { ent = v; guardEnterprise(v); }
+      });
+      g.__rcRootGuarded = true;
+    } catch (e) {}
+    guardEnterprise(ent);
+  }
+  var root = window.grecaptcha;
+  try {
+    Object.defineProperty(window, 'grecaptcha', {
+      configurable: true, enumerable: true,
+      get: function () { return root; },
+      set: function (v) { root = v; guardRoot(v); }
+    });
+  } catch (e) {}
+  guardRoot(root);
+})();
+"""
+
 RECAPTCHA_FETCH_JS = """
     var siteKey = arguments[0];
     var maxWait = arguments[1] || 30000;
@@ -245,13 +302,27 @@ RECAPTCHA_FETCH_JS = """
         var cfg = window.___grecaptcha_cfg;
         return !!(cfg && cfg.clients && Object.keys(cfg.clients).length > 0);
     }
+    function pickExecute() {
+        // Ưu tiên bản GỐC đã giữ bởi RECAPTCHA_GUARD_JS. Không có mà hàm công
+        // khai đã bị trang thay bằng bẫy → báo lỗi riêng để Python reload trang
+        // (KHÔNG gọi bẫy: token sẽ mang action extension_hijack_detected).
+        if (typeof window.__rcOrigExecute === 'function') return window.__rcOrigExecute;
+        var pub = window.grecaptcha && window.grecaptcha.enterprise &&
+                  window.grecaptcha.enterprise.execute;
+        if (!pub) return null;
+        if (String(pub).indexOf('extension_hijack_detected') >= 0) return 'TRAPPED';
+        return pub.bind(window.grecaptcha.enterprise);
+    }
     function tryExecute(retries) {
-        if (!window.grecaptcha || !window.grecaptcha.enterprise ||
-            !window.grecaptcha.enterprise.execute) {
+        var exec = pickExecute();
+        if (exec === 'TRAPPED') {
+            done({token: null, error: 'RC_TRAPPED'}); return;
+        }
+        if (!exec) {
             done({token: null, error: 'grecaptcha.enterprise not available'}); return;
         }
         try {
-            window.grecaptcha.enterprise.execute(siteKey, {action: action})
+            exec(siteKey, {action: action})
                 .then(function(t) { done({token: t, error: null}); })
                 .catch(function(e) {
                     var msg = String(e);
@@ -715,6 +786,11 @@ class SeleniumFlowWorker:
         # port nên không còn phụ thuộc trí nhớ của tiến trình.
         if pid in _login_drivers or _chrome_alive_on_port(port):
             self._log('info', f'Chrome của profile đang mở — attach qua debuggerAddress port={port}')
+            # Chrome này có thể được mở bởi 1 tiến trình client_tool TRƯỚC (đã
+            # restart) — relay SOCKS5 sống trong tiến trình nên phải dựng lại,
+            # cổng cố định nên khớp đúng `--proxy-server` Chrome đã nhận.
+            if self.profile.get('proxy_server'):
+                build_proxy_setup(self.profile.get('proxy_server') or '', pid)
             driver = _connect_to_chrome(port, log_fn=self._log)
             if driver:
                 self._log('ok', f'Attached vào Chrome sẵn có (port {port}) — không mở instance mới')
@@ -725,6 +801,7 @@ class SeleniumFlowWorker:
                     driver.execute_cdp_cmd('Network.enable', {})
                 except Exception:
                     pass
+                self._install_recaptcha_guard(driver)
                 return driver
             self._log('warn', 'Attach thất bại — fallback mở Chrome mới')
 
@@ -858,7 +935,19 @@ class SeleniumFlowWorker:
             driver.set_script_timeout(60)
         except Exception:
             pass
+        self._install_recaptcha_guard(driver)
         return driver
+
+    def _install_recaptcha_guard(self, driver) -> None:
+        """Cài `RECAPTCHA_GUARD_JS` cho MỌI lần load trang sau này. Trang đang mở
+        sẵn thì đã muộn (bẫy đã giăng) — `_get_fresh_recaptcha()` tự reload 1
+        lần khi gặp `RC_TRAPPED`."""
+        try:
+            driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument',
+                                   {'source': RECAPTCHA_GUARD_JS})
+            self._rc_guard_installed = True
+        except Exception as e:
+            self._log('warn', f'Không cài được reCAPTCHA guard: {e}')
 
     # ── Token capture từ Chrome performance logs ──────────────────────────────
 
@@ -1020,7 +1109,8 @@ class SeleniumFlowWorker:
         except Exception:
             pass
 
-    def _get_fresh_recaptcha(self, action: str = 'IMAGE_GENERATION') -> str:
+    def _get_fresh_recaptcha(self, action: str = 'IMAGE_GENERATION',
+                             _retry_trapped: bool = False) -> str:
         """Lấy reCAPTCHA v3 enterprise token — CÙNG JS với
         tests/utils/flow_session.py::RECAPTCHA_FETCH_JS (đã proven qua
         _test_textToImage.py / _test_textToVideo.py).
@@ -1041,6 +1131,21 @@ class SeleniumFlowWorker:
             return self._tokens.get('recaptchaToken') or ''
         token = (info or {}).get('token') or ''
         err = (info or {}).get('error') or ''
+        if err == 'RC_TRAPPED' and not _retry_trapped:
+            # Trang load TRƯỚC khi guard được cài (vd attach vào Chrome đang mở)
+            # → hàm công khai đã là bẫy. Cài guard rồi reload để giữ bản gốc.
+            self._log('warn', 'reCAPTCHA: hàm execute của trang đã bị thay bằng bẫy '
+                              '"extension_hijack_detected" — cài guard + tải lại trang')
+            if not getattr(self, '_rc_guard_installed', False):
+                self._install_recaptcha_guard(self.driver)
+            try:
+                self.driver.refresh()
+            except Exception as e:
+                self._log('warn', f'reload trang lỗi: {e}')
+            # reload đổi f.sid — bỏ cache session batchexecute để harvest lại
+            self._be_session_cache = None
+            time.sleep(4)
+            return self._get_fresh_recaptcha(action, _retry_trapped=True)
         if err or not token:
             self._log('warn', f'reCAPTCHA refresh ({action}): {err or "empty token"}')
             return self._tokens.get('recaptchaToken') or ''
@@ -3425,6 +3530,58 @@ class SeleniumFlowWorker:
         self._flow_models_cache = {'catalog': cat, '_at': now}
         return cat
 
+    _PAYGATE_TIER_JS = r"""
+        var dl = window.dataLayer || [];
+        for (var i = dl.length - 1; i >= 0; i--) {
+            var t = dl[i] && dl[i].MEDIA_GENERATION_PAYGATE_TIER;
+            if (t) return String(t);
+        }
+        return '';
+    """
+    _PAYGATE_TTL_SECS = 600
+
+    def _flow_paygate_tier(self) -> str:
+        """Hạng gói của tài khoản (vd `PAYGATE_TIER_TWO`). CÓ CACHE 10 phút.
+        Trả '' nếu không đọc được — caller giữ cách dò cũ.
+
+        Nguồn chính: RPC `nzlxg` (`/VideoFxService.GetCredits`) — chỉ đọc, không
+        cần reCAPTCHA, chính trang gọi mỗi lần tải. Dự phòng: `window.dataLayer`
+        (`MEDIA_GENERATION_PAYGATE_TIER`) — CHỈ có sau khi người dùng thao tác
+        trên trang, lần tải mới thì trống (bản đầu chỉ đọc nguồn này nên luôn
+        ra '' trên worker — log 2026-09-23 11:31).
+
+        (2026-09-23) Lý do tồn tại: không biết hạng thì task video gửi key
+        thường trước rồi mới tới `_ultra`. Qua proxy, bản sai bị Google trả
+        `PUBLIC_ERROR_UNUSUAL_ACTIVITY` và task hỏng hẳn, trong khi bấm tay
+        (trang gửi đúng key ngay) vẫn chạy."""
+        now = time.time()
+        c = getattr(self, '_paygate_cache', None)
+        if c and c.get('tier') and now - c['_at'] < self._PAYGATE_TTL_SECS:
+            return c['tier']
+        tier, src = '', ''
+        try:
+            session = self._be_session()
+            if session:
+                raw = self._batchexecute_call('nzlxg', [], session, timeout=20)
+                if raw:
+                    tier = flow_models.paygate_from_credits(
+                        self._batchexecute_parse(raw, 'nzlxg'))
+                    src = 'GetCredits'
+        except Exception as e:
+            self._log('warn', f'GetCredits (nzlxg) lỗi: {e}')
+        if not tier:
+            try:
+                tier = (self.driver.execute_script(self._PAYGATE_TIER_JS) or '').strip()                     if self.driver else ''
+                src = 'dataLayer'
+            except Exception as e:
+                self._log('warn', f'Không đọc được hạng gói Flow: {e}')
+        if tier and (not c or c.get('tier') != tier):
+            self._log('info', f'Hạng gói Flow: {tier} (nguồn: {src})')
+        elif not tier:
+            self._log('warn', 'Không đọc được hạng gói Flow — dò model key theo cách cũ')
+        self._paygate_cache = {'tier': tier, '_at': now}
+        return tier
+
     def _resolve_video_model_keys(self, task: dict, ingredient: bool, aspect: str):
         """DANH SÁCH `videoModelKey` nên thử, khớp (nhãn model + tỉ lệ + thời
         lượng), tốt nhất đứng đầu. Trả `(keys, note)`.
@@ -3440,10 +3597,15 @@ class SeleniumFlowWorker:
         duration = flow_models.parse_duration(task.get('video_duration'))
         cat = self._flow_models_catalog()
         if cat and label:
+            tier = self._flow_paygate_tier()
+            known_ultra = flow_models.ultra_from_paygate(tier)
             keys, note = flow_models.resolve_candidates(
                 cat, label, kind, aspect, duration,
-                prefer_ultra=bool(getattr(self, '_flow_ultra_pref', False)))
+                prefer_ultra=bool(getattr(self, '_flow_ultra_pref', False)),
+                known_ultra=known_ultra)
             if keys:
+                if known_ultra is not None:
+                    note += f', gói {tier}'
                 return keys, note
             # Catalog nói RÕ là không làm được (họ không có mode đó) — vẫn thử
             # bảng cũ, nhưng báo to để không âm thầm gửi key ảo.

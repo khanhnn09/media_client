@@ -65,6 +65,44 @@ KIND_I2V = 'i2v'          # frameToVideo — chỉ ảnh đầu
 KIND_I2V_FL = 'i2v_fl'    # frameToVideo — ảnh đầu + ảnh cuối
 
 
+# Hạng gói Flow tự đẩy vào `window.dataLayer` (`MEDIA_GENERATION_PAYGATE_TIER`).
+# Enum lấy từ bundle Flow: 0 UNSPECIFIED, 5 ZERO, 1 ONE (Pro), 2 TWO (Ultra),
+# 3 NOT_PAID, 4 UNSUBSCRIBED_WITH_CREDITS, 7 GEMNOVA. Chỉ TWO dùng key `_ultra`
+# — xác nhận 2026-09-23: tài khoản TIER_TWO bấm tay trên trang gửi thẳng
+# `veo_3_1_r2v_fast_landscape_ultra` (catalog ghi key đó chỉ có giá ở hạng 3).
+PAYGATE_ULTRA = {'PAYGATE_TIER_TWO': True,
+                 'PAYGATE_TIER_ONE': False,
+                 'PAYGATE_TIER_ZERO': False,
+                 'PAYGATE_TIER_NOT_PAID': False,
+                 'PAYGATE_TIER_UNSUBSCRIBED_WITH_CREDITS': False}
+
+
+# Bảng số → tên hạng, chép từ bundle Flow (`var ewa={0:"PAYGATE_TIER_UNSPECIFIED",…}`).
+PAYGATE_ENUM = {0: 'PAYGATE_TIER_UNSPECIFIED', 1: 'PAYGATE_TIER_ONE',
+                2: 'PAYGATE_TIER_TWO', 3: 'PAYGATE_TIER_NOT_PAID',
+                4: 'PAYGATE_TIER_UNSUBSCRIBED_WITH_CREDITS', 5: 'PAYGATE_TIER_ZERO',
+                6: 'PAYGATE_TIER_EXEMPT', 7: 'PAYGATE_TIER_GEMNOVA',
+                8: 'PAYGATE_TIER_TIER1P5'}
+
+
+def paygate_from_credits(payload):
+    """Hạng gói từ response RPC `nzlxg` (`/VideoFxService.GetCredits`).
+
+    Shape thật (2026-09-23): `[credits, paygateTier, ?, ?, null, credits]`,
+    vd `[24747, 2, 3, 3, null, 24747]`. Ô [1] = field 2 của message `_.Py`,
+    bundle đọc bằng `vI()` rồi tra `ewa[...]` ra tên. Trả '' nếu shape lạ."""
+    try:
+        n = payload[1]
+    except (TypeError, IndexError, KeyError):
+        return ''
+    return PAYGATE_ENUM.get(n, '') if isinstance(n, int) and n else ''
+
+
+def ultra_from_paygate(tier):
+    """`True`/`False` theo hạng gói, `None` nếu không nhận ra (giữ cách dò cũ)."""
+    return PAYGATE_ULTRA.get((tier or '').strip().upper())
+
+
 def kind_of(key):
     """Phân loại 1 model key về đúng mode task. `None` = không phải key sinh
     video (extend/upsample/edit...)."""
@@ -162,7 +200,7 @@ def _find_family(catalog, label, group='video'):
 
 
 def resolve_candidates(catalog, label, kind, aspect_ratio='16:9',
-                       duration=None, prefer_ultra=False):
+                       duration=None, prefer_ultra=False, known_ultra=None):
     """Danh sách model key khớp (nhãn + mode + tỉ lệ + thời lượng), ĐÃ SẮP
     theo thứ tự nên thử.
 
@@ -170,7 +208,14 @@ def resolve_candidates(catalog, label, kind, aspect_ratio='16:9',
     (để caller ghi log rồi tự fallback).
 
     `prefer_ultra` = biến thể mà tài khoản này ĐÃ ĐƯỢC XÁC NHẬN dùng được (do
-    `worker` học qua lần thử trước); chưa biết thì để `False`."""
+    `worker` học qua lần thử trước); chưa biết thì để `False`.
+
+    `known_ultra` (2026-09-23) = hạng gói ĐỌC ĐƯỢC từ chính trang Flow
+    (`True` = gói Ultra, `False` = không phải, `None` = chưa biết). Khi biết
+    thì CHỈ giữ đúng biến thể đó (nếu họ có biến thể đó) — KHÔNG dò bản sai
+    trước: gửi nhầm biến thể qua proxy bị Google trả
+    `PUBLIC_ERROR_UNUSUAL_ACTIVITY` (thay vì `MODEL_ACCESS_DENIED`) và chặn
+    luôn cả task, xem CHANGELOG 2026-09-23."""
     fam = _find_family(catalog, label)
     if not fam:
         return [], 'không có họ model nào tên "%s" trong catalog' % label
@@ -205,6 +250,11 @@ def resolve_candidates(catalog, label, kind, aspect_ratio='16:9',
 
     # Thứ tự thử: biến thể đã biết tài khoản dùng được trước -> không phải
     # 360p -> tên ngắn nhất (bản "gốc" thay vì biến thể) — ỔN ĐỊNH giữa các lần.
+    if known_ultra is not None:
+        prefer_ultra = known_ultra
+        same_tier = [e for e in cands if ('_ultra' in e['key']) == known_ultra]
+        if same_tier:
+            cands = same_tier
     cands.sort(key=lambda e: (('_ultra' not in e['key']) if prefer_ultra
                               else ('_ultra' in e['key']),
                               '_360p' in e['key'], len(e['key']), e['key']))
@@ -214,8 +264,8 @@ def resolve_candidates(catalog, label, kind, aspect_ratio='16:9',
 
 
 def resolve(catalog, label, kind, aspect_ratio='16:9', duration=None,
-            prefer_ultra=False):
+            prefer_ultra=False, known_ultra=None):
     """Bản 1-key của `resolve_candidates()` (ứng viên tốt nhất)."""
     keys, note = resolve_candidates(catalog, label, kind, aspect_ratio,
-                                    duration, prefer_ultra)
+                                    duration, prefer_ultra, known_ultra)
     return (keys[0] if keys else None), note

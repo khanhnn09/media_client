@@ -110,14 +110,43 @@ def _handle(client, host, port, user, pw, state):
                     pass
 
 
+# Dải cổng cố định cho relay. Cổng tính từ HASH của bộ proxy (host, port,
+# user, pass) nên KHÔNG đổi giữa các lần chạy client_tool: Chrome mở ở chế độ
+# tách rời (detach) sống lâu hơn tiến trình client_tool, mà `--proxy-server`
+# của nó đã ghi cứng cổng relay lúc launch. Cổng ngẫu nhiên (bản đầu 2026-09-23)
+# khiến restart client_tool xong thì Chrome trỏ vào cổng chết → mất mạng.
+_PORT_BASE, _PORT_SPAN, _PORT_TRIES = 42000, 6000, 20
+
+
+def _stable_port(key) -> int:
+    import hashlib
+    h = hashlib.sha1(repr(key).encode('utf-8')).digest()
+    return _PORT_BASE + int.from_bytes(h[:4], 'big') % _PORT_SPAN
+
+
 def ensure_socks5_relay(host: str, port: int, user: str, pw: str) -> int:
-    """Trả cổng cục bộ của relay cho proxy này (tạo mới nếu chưa có)."""
+    """Trả cổng cục bộ của relay cho proxy này (tạo mới nếu chưa có).
+    Cổng ỔN ĐỊNH theo bộ proxy — xem `_stable_port()`."""
     key = (host, int(port), user, pw)
     with _relays_lock:
         if key in _relays:
             return _relays[key]
-        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        srv.bind(('127.0.0.1', 0))
+        start = _stable_port(key)
+        srv = None
+        for i in range(_PORT_TRIES):
+            cand = _PORT_BASE + (start - _PORT_BASE + i) % _PORT_SPAN
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                s.bind(('127.0.0.1', cand))
+                srv = s
+                break
+            except OSError:
+                s.close()
+        if srv is None:
+            srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            srv.bind(('127.0.0.1', 0))
+            log.warning('[proxy-relay] Không bind được cổng cố định — dùng cổng ngẫu nhiên, '
+                        'Chrome sẽ mất mạng nếu client_tool khởi động lại')
         srv.listen(128)
         local_port = srv.getsockname()[1]
         state = {}
