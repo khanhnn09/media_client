@@ -11,8 +11,8 @@ routes.py, harness test ở tests/utils/profile_target.py), nên không cần s�
 từng call site.
 
 ⚠️ PHẠM VI — CHỈ traffic của TRÌNH DUYỆT đi qua proxy. Các lệnh HTTP do CHÍNH
-Python bắn (heartbeat/tải ref ảnh từ backend qua `requests`, và nhánh dự phòng
-`aisandbox` qua `curl_cffi` trong worker.py) VẪN đi thẳng — đúng ý muốn:
+Python bắn (heartbeat/tải ref ảnh từ backend qua `requests`) VẪN đi thẳng —
+đúng ý muốn:
 heartbeat/tải file nội bộ không nên vòng qua proxy. Đường generate CHÍNH hiện
 tại (`batchexecute`) chạy bằng `fetch()` TRONG TRANG nên vẫn được proxy che,
 xem CLAUDE.md §11.46.

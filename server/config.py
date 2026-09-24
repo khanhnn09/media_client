@@ -96,22 +96,6 @@ _DEFAULT_SERVER_SETTINGS = {
     # `_rotate_project_if_full()`) — KHÔNG gọi API riêng chỉ để đếm. 0 = tắt
     # tính năng (không bao giờ tự chuyển).
     'max_project_media_items': 300,
-    # (2026-08-13) Log ĐẦY ĐỦ request dạng lệnh `curl` copy-paste được (URL +
-    # mọi header + body JSON nguyên văn) + response body ĐẦY ĐỦ (không cắt
-    # 300 ký tự như log lỗi mặc định) mỗi lần gọi trực tiếp API tạo ảnh/video/
-    # uploadImage (`_post_aisandbox()`, worker.py) — theo yêu cầu user "thêm
-    # bật ghi lại log curl đầy đủ khi gọi tạo video/image qua api". Mặc định
-    # TẮT (0) — log dài, chỉ bật tạm khi cần debug 1 request cụ thể (vd payload
-    # bị 400 INVALID_ARGUMENT nhưng log gọn không đủ chi tiết để soi).
-    # ⚠️ Header `authorization` KHÔNG bị che khi bật — log này có thể lộ bearer
-    # token thật của phiên đang chạy, không nên chia sẻ log ra ngoài lúc đang bật.
-    'debug_log_curl': 0,
-    # (2026-09-04) Dùng RPC `batchexecute` (flow.google.com) làm ĐƯỜNG CHÍNH
-    # cho upload/generate ảnh+video, `aisandbox` chỉ còn là DỰ PHÒNG.
-    # Bật vì app Flow đã bỏ hẳn endpoint aisandbox — đường cũ 403 hàng loạt
-    # (log profile 25, 2026-09-04 00:33-00:34). Đặt 0 để quay lại dùng THẲNG
-    # aisandbox nếu đường mới có vấn đề (không cần sửa code).
-    'generate_via_batchexecute': 1,
     # (2026-09-06) Gemini chat — GỬI ẨN prompt qua RPC `StreamGenerate` thay vì
     # gõ vào ô nhập liệu. CHỈ đổi bước GỬI; đọc kết quả vẫn bằng DOM. Request có
     # FILE ĐÍNH KÈM luôn tự động dùng DOM (chưa capture shape endpoint upload).
@@ -162,6 +146,10 @@ _DEFAULT_SERVER_SETTINGS = {
     # thành công nhưng chưa thấy kết quả thì KHÔNG chuyển DOM (API có thể vẫn
     # đang render — chạy DOM sẽ tạo trùng video).
     'api_fallback_to_dom': 0,
+    # 2026-09-24: mở trình duyệt bằng CloakBrowser (luồng riêng server/cloak_browser.py)
+    'use_cloakbrowser': 0,
+    'cloak_geoip':      1,   # = launch(geoip=True): múi giờ + ngôn ngữ + WebRTC theo IP proxy
+    'cloak_humanize':   1,   # = launch(humanize=True): chuột Bezier + nhịp gõ phím người thật
     # (2026-08-20) Bậc thang escalation THEO BATCH — theo yêu cầu user: "Nếu batch
     # gửi lên 5 task 1 lúc mà thành công 1 vẫn tính batch thành công -> nhưng nếu
     # cả batch đều không thành công liên tiếp 2 batch liền -> thì mới xóa cache
@@ -181,25 +169,19 @@ _DEFAULT_SERVER_SETTINGS = {
     # cả lô cùng chết vì 1 nguyên nhân chung (session/cookie hỏng, project bị
     # Google chặn...) chứ không phải vài task lẻ lỗi rải rác.
     #
-    # `batch_fail_count_before_cleanup` — số batch lỗi LIÊN TIẾP trước khi dọn
-    # cookie labs.google + cache (GIỮ NGUYÊN cookie đăng nhập Google ở domain
-    # khác, xem `worker.py::_cdp_clear_cache_and_cookies()`) rồi click lại nút
-    # "Create with Google Flow". ⚠️ (2026-08-20, theo yêu cầu user "theo phương
-    # án 1: nhưng không click create vì chỉ khi xóa cookie mới cần click") —
-    # TRƯỚC ĐÂY 2 bước này chạy sau MỌI batch vô điều kiện; giờ CHỈ chạy khi
-    # chạm ngưỡng này. Batch bình thường vẫn refresh + reconcile (lấy task đã
-    # render xong về, đánh dấu done) như cũ — KHÔNG bị gate, chỉ bỏ 2 bước
-    # xoá-cookie + click-create.
-    'batch_fail_count_before_cleanup': 2,
+    # (2026-09-24) Đã BỎ nấc `batch_fail_count_before_cleanup` (dọn cookie labs.google
+    # + click Create sau N batch lỗi) theo yêu cầu user.
     # `batch_fail_count_before_sleep` — số batch lỗi LIÊN TIẾP trước khi cho
     # profile "ngủ" (dùng chung `error_sleep_secs` làm thời lượng ngủ). Lúc ngủ,
     # `_clear_profile_if_sleeping()` xoá TẤT CẢ cookie + cache (khác mặc định
     # chỉ-xoá-cache) rồi ép bước "check đăng nhập Google" chạy ở lần khởi động
     # worker KẾ TIẾP — bất kể `google_login_check_enabled` đang tắt hay bật —
     # vì vừa xoá sạch cookie thì chắc chắn đã đăng xuất, không check thì mọi
-    # task sau đó đều lỗi. PHẢI lớn hơn `batch_fail_count_before_cleanup` (nếu
-    # đặt ≤ thì bước dọn dẹp không bao giờ có cơ hội chạy trước khi ngủ).
+    # task sau đó đều lỗi. Có thể tắt phần xoá bằng `batch_sleep_wipe_cookies`.
     'batch_fail_count_before_sleep': 3,
+    # (2026-09-24) Khi ngủ vì batch lỗi liên tiếp: 1 = xoá TẤT CẢ cookie/cache + ép
+    # check đăng nhập lần sau (hành vi cũ); 0 = chỉ ngủ, không xoá gì.
+    'batch_sleep_wipe_cookies': 1,
     # (2026-09-03) Cửa sổ "gần đây" (giây) khi `_dom_fetch_project_media()` lọc
     # candidate gọi RPC `as29s` — xem CLAUDE.md §11.45. `Zzl0ze` liệt kê MỌI
     # media của project (có thể hàng trăm), mà muốn biết prompt+URL của 1 item

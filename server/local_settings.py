@@ -21,9 +21,10 @@ _LOCAL_SETTINGS_PATH = Path(__file__).parent.parent / 'local_settings.json'
 
 # Setting kiểu bật/tắt — lưu 0/1 trong JSON, GUI dùng checkbox (không gõ số).
 BOOL_KEYS = (
-    'quiet_hours_enabled', 'debug_log_curl', 'generate_via_batchexecute',
+    'quiet_hours_enabled',
     'gemini_send_via_rpc', 'google_login_check_enabled',
-    'bind_tasks_to_project_email', 'api_fallback_to_dom',
+    'bind_tasks_to_project_email', 'api_fallback_to_dom', 'use_cloakbrowser',
+    'cloak_geoip', 'cloak_humanize', 'batch_sleep_wipe_cookies',
 )
 
 _TRUE_STR  = {'1', 'true', 'yes', 'on', 'bật', 'bat'}
@@ -57,7 +58,7 @@ def _clamp(settings: dict) -> dict:
                       'error_count_before_refresh', 'refresh_count_before_new_project',
                       'error_sleep_secs', 'error_window_minutes', 'error_window_max_errors',
                       'reconcile_wait_secs', 'reconcile_max_rounds',
-                      'batch_fail_count_before_cleanup', 'batch_fail_count_before_sleep',
+                      'batch_fail_count_before_sleep',
                       'reconcile_lookback_secs', 'reconcile_retry_lookback_secs')
     for k in int_min1_keys:
         if k in s:
@@ -66,14 +67,6 @@ def _clamp(settings: dict) -> dict:
             except (TypeError, ValueError):
                 s[k] = _DEFAULT_SERVER_SETTINGS.get(k, 1)
 
-    # (2026-08-20) Bậc thang escalation THEO BATCH — ngưỡng "ngủ" PHẢI lớn hơn
-    # ngưỡng "dọn cookie + click Create", nếu không bước dọn dẹp KHÔNG BAO GIỜ
-    # có cơ hội chạy (batch chạm ngưỡng ngủ trước, worker thoát luôn). Đặt sai
-    # (≤) thì tự nâng ngưỡng ngủ lên đúng 1 bậc trên ngưỡng dọn dẹp thay vì im
-    # lặng chấp nhận cấu hình vô hiệu hoá mất 1 bậc thang.
-    if 'batch_fail_count_before_cleanup' in s and 'batch_fail_count_before_sleep' in s:
-        if s['batch_fail_count_before_sleep'] <= s['batch_fail_count_before_cleanup']:
-            s['batch_fail_count_before_sleep'] = s['batch_fail_count_before_cleanup'] + 1
 
     if 'max_concurrent_veo3_profiles' in s:
         try:

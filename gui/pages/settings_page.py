@@ -38,10 +38,16 @@ _TABS = [
          'đã gán và dùng lại id ảnh đã lưu làm tham chiếu thay vì upload.'),
         ('google_login_check_enabled',     'Check đăng nhập Google trước khi vào trang', 'bool',
          'Tắt = vào thẳng trang nhận task. Bật = tự phát hiện và tự đăng nhập lại nếu bị đăng xuất.'),
+        ('use_cloakbrowser',               'Chạy bằng CloakBrowser (chống "hoạt động bất thường")', 'bool',
+         'Luồng RIÊNG, không dùng undetected_chromedriver. Thư mục profile riêng (<profile>_cloak) — '
+         'lần đầu phải "Mở login browser" đăng nhập lại. Lần đầu tự tải ~550MB. '
+         'Áp dụng khi mở trình duyệt kế tiếp (Stop rồi Start profile).'),
+        ('cloak_geoip',                    'Cloak: geoip', 'bool',
+         'Khớp múi giờ + ngôn ngữ + IP WebRTC theo IP ra của proxy (như launch(geoip=True)).'),
+        ('cloak_humanize',                 'Cloak: humanize', 'bool',
+         'Chuột đi đường cong, gõ phím theo nhịp người thật khi thao tác giao diện (như launch(humanize=True)).'),
     ]),
     ('Tạo ảnh/video', [
-        ('generate_via_batchexecute',      'Tạo qua batchexecute (đường API mới)', 'bool',
-         'Bỏ chọn = dùng đường aisandbox cũ.'),
         ('api_fallback_to_dom',            'Profile API: lỗi API thì chuyển sang DOM', 'bool',
          'Mặc định tắt — profile API CHỈ chạy API, task lỗi báo về server. Bật = task lỗi API '
          '(hoặc không gọi được API) chạy lại ngay bằng DOM. Video đã gửi API thành công '
@@ -63,11 +69,11 @@ _TABS = [
         ('refresh_count_before_new_project', 'Số lần refresh trước khi tạo project mới', 'int', ''),
         ('error_sleep_secs',                 'Thời gian ngủ khi escalation (giây)', 'int', ''),
         ('error_wait_secs',                  'Chờ sau lỗi trước khi thử lại (giây)', 'int', ''),
-        ('batch_fail_count_before_cleanup',  'Batch lỗi liên tiếp → dọn cookie', 'int',
-         'Xoá cookie labs.google + cache (giữ đăng nhập) rồi bấm "Create with Google Flow". '
-         'Batch có ≥1 task thành công = batch thành công.'),
         ('batch_fail_count_before_sleep',    'Batch lỗi liên tiếp → ngủ', 'int',
-         'Ngủ + xoá toàn bộ cookie/cache + ép check đăng nhập lần sau. Phải lớn hơn ngưỡng dọn cookie.'),
+         'Batch có ≥1 task thành công = batch thành công. Thời gian ngủ = "Thời gian ngủ khi escalation".'),
+        ('batch_sleep_wipe_cookies',         'Khi ngủ: xoá toàn bộ cookie/cache', 'bool',
+         'Bật = xoá hết cookie/cache (cả đăng nhập) rồi tự check/đăng nhập lại ở lần chạy sau. '
+         'Tắt = chỉ ngủ, giữ nguyên cookie/cache.'),
         ('error_patterns',                   'Mẫu lỗi nhận diện', 'list',
          'Phân cách bằng dấu phẩy.'),
     ]),
@@ -81,8 +87,6 @@ _TABS = [
          'Check đầu batch để không tạo trùng task đã render xong.'),
     ]),
     ('Debug', [
-        ('debug_log_curl',                 'Log đầy đủ curl khi gọi API', 'bool',
-         'Log URL + header + body. ⚠ Có thể lộ bearer token trong log.'),
     ]),
 ]
 

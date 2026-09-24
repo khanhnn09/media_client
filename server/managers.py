@@ -524,7 +524,7 @@ class _ProfileManager:
             raise ValueError('profile_dir không tồn tại trên máy này')
         return _wipe_chrome_profile_dir(profile_dir)
 
-    def clear_cache_only(self, profile_id: int) -> dict:
+    def clear_cache_only(self, profile_id: int, profile_dir: str | None = None) -> dict:
         """(2026-08-12) Xoá cache; (2026-08-14, theo yêu cầu user "khi lỗi quá
         nhiều ngoài xóa cache xóa thêm các cookie không liên quan đăng nhập")
         từng MỞ RỘNG thêm xoá cookie mọi domain KHÔNG liên quan đăng nhập.
@@ -543,8 +543,8 @@ class _ProfileManager:
         Dùng bởi `worker.py::_clear_profile_if_sleeping()` (tự phục hồi khi
         sleeping do lỗi nhiều). CÙNG ràng buộc "profile phải đóng" như
         `clear_browser_data()` ở trên (caller đảm bảo)."""
-        profile = self.get(profile_id)
-        profile_dir = (profile or {}).get('profile_dir')
+        if not profile_dir:   # không truyền → thư mục Chrome thường (CloakBrowser truyền <dir>_cloak)
+            profile_dir = (self.get(profile_id) or {}).get('profile_dir')
         if not profile_dir or not os.path.isdir(profile_dir):
             raise ValueError('profile_dir không tồn tại trên máy này')
         cache_result = _clear_chrome_cache_only(profile_dir)
@@ -554,7 +554,7 @@ class _ProfileManager:
             'errors':         cache_result['errors'],
         }
 
-    def clear_cache_and_all_cookies(self, profile_id: int) -> dict:
+    def clear_cache_and_all_cookies(self, profile_id: int, profile_dir: str | None = None) -> dict:
         """(2026-08-20) Xoá cache + TẤT CẢ cookie (kể cả cookie đăng nhập
         Google) — dùng CHỈ cho bậc thang escalation THEO BATCH khi profile ngủ
         vì `batch_fail_count_before_sleep` batch lỗi liên tiếp (xem
@@ -571,8 +571,8 @@ class _ProfileManager:
         cookie - cache -> rồi check login -> đăng nhập vào project lại như
         trước". CÙNG ràng buộc "profile phải đóng" như 2 hàm trên (caller đảm
         bảo — `_clear_profile_if_sleeping()` gọi ngay sau `driver.quit()`)."""
-        profile = self.get(profile_id)
-        profile_dir = (profile or {}).get('profile_dir')
+        if not profile_dir:   # không truyền → thư mục Chrome thường (CloakBrowser truyền <dir>_cloak)
+            profile_dir = (self.get(profile_id) or {}).get('profile_dir')
         if not profile_dir or not os.path.isdir(profile_dir):
             raise ValueError('profile_dir không tồn tại trên máy này')
         cache_result = _clear_chrome_cache_only(profile_dir)

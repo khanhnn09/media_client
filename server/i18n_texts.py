@@ -17,6 +17,27 @@ from .config import log
 _I18N_TEXTS_PATH = Path(__file__).parent.parent / 'i18n_texts.json'
 
 _DEFAULT_I18N_TEXTS = {
+    # (2026-09-24) Nhãn giao diện flow.google.com — Flow dịch aria-label/chữ
+    # theo ngôn ngữ TÀI KHOẢN (xác nhận trên profile 25 tiếng Việt). Biến thể
+    # tiếng Việt lấy từ DOM thật, trừ 'Đang tải lên'/'Thêm vào lời nhắc'
+    # là dự đoán (chưa thấy trên trang).
+    'flowSettingsTrigger': ['Settings trigger', 'Điều kiện kích hoạt cài đặt'],
+    'flowStartGeneration': ['Start generation', 'Bắt đầu tạo'],
+    'flowAddIngredients': ['Add ingredients to the prompt box', 'Thêm thành phần vào ô nhập câu lệnh'],
+    'flowSelectModel': ['Select model family', 'Chọn nhóm mô hình'],
+    'flowToggleMode': ['Mode', 'Chế độ'],
+    'flowToggleVideoType': ['Video type', 'Loại video'],
+    'flowToggleAspectRatio': ['Aspect ratio', 'Tỷ lệ khung hình'],
+    'flowToggleOutputCount': ['Output count', 'Số lượng kết quả đầu ra'],
+    'flowVideoTypeIngredients': ['Ingredients', 'Thành phần'],
+    'flowVideoTypeFrames': ['Frames', 'Khung hình'],
+    'flowUploadMedia': ['Upload media', 'Tải nội dung nghe nhìn lên'],
+    'flowUploading': ['Uploading', 'Đang tải lên'],
+    'flowToggleDuration': ['Video duration', 'Duration', 'Thời lượng video'],
+    'flowFrameStart': ['Start', 'Bắt đầu'],
+    'flowFrameEnd': ['End', 'Kết thúc'],
+    'flowCreditWarning': ['credit', 'tín dụng'],
+    'flowAddToPrompt': ['Add to prompt', 'Thêm vào câu lệnh', 'Thêm vào lời nhắc'],
     'imageTab':          ['Hình ảnh', 'Images'],
     'searchPlaceholder': ['Tìm kiếm thành phần', 'Search assets'],
     'addToPrompt':       ['Thêm vào câu lệnh', 'Add to Prompt'],

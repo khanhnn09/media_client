@@ -53,5 +53,75 @@
   "geminiRatioVertical": [
     "Dọc",
     "Portrait"
+  ],
+  "flowSettingsTrigger": [
+    "Settings trigger",
+    "Điều kiện kích hoạt cài đặt"
+  ],
+  "flowStartGeneration": [
+    "Start generation",
+    "Bắt đầu tạo"
+  ],
+  "flowAddIngredients": [
+    "Add ingredients to the prompt box",
+    "Thêm thành phần vào ô nhập câu lệnh"
+  ],
+  "flowSelectModel": [
+    "Select model family",
+    "Chọn nhóm mô hình"
+  ],
+  "flowToggleMode": [
+    "Mode",
+    "Chế độ"
+  ],
+  "flowToggleVideoType": [
+    "Video type",
+    "Loại video"
+  ],
+  "flowToggleAspectRatio": [
+    "Aspect ratio",
+    "Tỷ lệ khung hình"
+  ],
+  "flowToggleOutputCount": [
+    "Output count",
+    "Số lượng kết quả đầu ra"
+  ],
+  "flowVideoTypeIngredients": [
+    "Ingredients",
+    "Thành phần"
+  ],
+  "flowVideoTypeFrames": [
+    "Frames",
+    "Khung hình"
+  ],
+  "flowUploadMedia": [
+    "Upload media",
+    "Tải nội dung nghe nhìn lên"
+  ],
+  "flowUploading": [
+    "Uploading",
+    "Đang tải lên"
+  ],
+  "flowAddToPrompt": [
+    "Add to prompt",
+    "Thêm vào câu lệnh",
+    "Thêm vào lời nhắc"
+  ],
+  "flowToggleDuration": [
+    "Video duration",
+    "Duration",
+    "Thời lượng video"
+  ],
+  "flowFrameStart": [
+    "Start",
+    "Bắt đầu"
+  ],
+  "flowFrameEnd": [
+    "End",
+    "Kết thúc"
+  ],
+  "flowCreditWarning": [
+    "credit",
+    "tín dụng"
   ]
 }

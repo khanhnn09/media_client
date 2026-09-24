@@ -221,8 +221,6 @@ class ProfilesPage(QWidget):
 
             running    = p.get('worker_running', False)
             login_open = p.get('login_open', False)
-            has_tokens = p.get('has_tokens', False)
-            age        = p.get('token_age')
             port       = p.get('debug_port', '—')
 
             # Col 0: hidden id
@@ -369,15 +367,6 @@ class ProfilesPage(QWidget):
             st_row.addWidget(st); st_row.addStretch()
             st_col.addLayout(st_row)
 
-            # Token — logic/màu giữ NGUYÊN như cột "Tokens" cũ.
-            if running:
-                if has_tokens:
-                    tk = Badge(f'✔  {age}s' if age is not None else '✔  ok', 'green')
-                else:
-                    tk = Badge('✘  —', 'red')
-            else:
-                tk = Badge('—', 'gray')
-
             # Lỗi — logic/màu/tooltip giữ NGUYÊN như cột "Lỗi" cũ, cộng thêm
             # tooltip "Hôm nay" (done/error TRONG NGÀY, bền vững phía backend —
             # KHÁC err_total chỉ tính trong phiên chạy hiện tại) thay cho cột
@@ -402,7 +391,7 @@ class ProfilesPage(QWidget):
                 err_badge.setToolTip(today_tip)
 
             sub_row = QHBoxLayout(); sub_row.setSpacing(4)
-            sub_row.addWidget(tk); sub_row.addWidget(err_badge); sub_row.addStretch()
+            sub_row.addWidget(err_badge); sub_row.addStretch()
             st_col.addLayout(sub_row)
             self._table.setCellWidget(row, 3, st_w)
 

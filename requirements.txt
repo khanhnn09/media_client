@@ -18,6 +18,8 @@ requests>=2.31.0
 selenium>=4.47.0
 undetected-chromedriver>=3.5.5
 selenium-stealth>=1.0.6
+# CloakBrowser (2026-09-24) — Chromium vá fingerprint, chỉ dùng khi bật setting use_cloakbrowser
+cloakbrowser[geoip]>=0.5.10
 # psutil (2026-07-20) — dùng bởi server/reset_guard.py để tìm + kill process
 # (và toàn bộ Chrome/chromedriver con của nó) còn giữ port 13445 từ lần chạy
 # trước, tự dọn sạch ngay lúc khởi động thay vì bắt user tự vào Task Manager.
@@ -35,6 +37,5 @@ setuptools>=69.0.0
 pytest>=7.4.0
 pytest-timeout>=2.2.0
 Pillow>=10.0.0
-curl_cffi>=0.16.1
 PySocks>=1.7.1
 pyotp>=2.9.0

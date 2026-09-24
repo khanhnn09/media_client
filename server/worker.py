@@ -2,22 +2,15 @@
 `batchexecute` của flow.google.com từ trong trang), DOM mode (điều khiển DOM
 đầy đủ), gemini mode (chat + upload video). 1 instance = 1 profile Chrome.
 
-⚠️ (2026-09-04) API mode đã chuyển HẲN sang `batchexecute` — xem
-`server/flow_be.py` và `docs/FLOW_BATCHEXECUTE_API.md`. Toàn bộ máy móc
-`aisandbox` cũ (bearer token, fingerprint, curl_cffi impersonate) VẪN CÒN
-NGUYÊN trong file này nhưng ĐÃ CẤT: chỉ chạy khi setting
-`generate_via_batchexecute` = 0. KHÔNG chạy song song 2 đường."""
+API mode CHỈ chạy `batchexecute` — xem `server/flow_be.py` và
+`docs/FLOW_BATCHEXECUTE_API.md`. (2026-09-24) Đường `aisandbox` cũ (bearer
+token, fingerprint, curl_cffi impersonate, setting `generate_via_batchexecute`)
+đã GỠ HẲN khỏi code."""
 
 import base64, json, os, random, re, shutil, sys, tempfile, threading, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import unquote, urlparse
 
-try:
-    from curl_cffi import requests as cf_requests
-    HAS_CFFI = True
-except ImportError:
-    HAS_CFFI = False
-    cf_requests = None
 
 from .proxy_config import build_proxy_setup
 from .config import FLOW_SERVER, POLL_INTERVAL, _IS_ARM, req_lib, _profile_log, VIDEO_TMP_DIR
@@ -26,7 +19,6 @@ from .i18n_texts import get_i18n_texts
 from .media_upload_cache import get_cached_media_name, set_cached_media_name
 from . import flow_media_index
 from .managers import pm, em
-from . import flow_api
 from . import flow_be
 from . import gemini_be
 from . import model_catalog
@@ -53,14 +45,7 @@ from .state import _login_drivers, _sleep_until_by_pid, _force_login_check
 _MODEL_SRC_FROM_DB = frozenset({'db', 'db-derived'})
 
 FLOW_PROJECT_URL         = 'https://labs.google/fx/vi/tools/flow'
-AISANDBOX_BASE           = 'https://aisandbox-pa.googleapis.com/v1'
 LABS_RECAPTCHA_SITE_KEY  = '6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV'
-LABS_SESSION_URL         = 'https://labs.google/fx/api/auth/session'
-# API key Flow UI dùng cho aisandbox (public, cố định trong bundle) — khớp tests/utils/flow_session.py
-DEFAULT_GOOG_API_KEY     = 'AIzaSyBtrm0o5ab1c-Ec8ZuLcGt3oJAA5VWt3pY'
-X_BROWSER_COPYRIGHT      = 'Copyright 2026 Google LLC. All Rights Reserved.'
-CONTENT_TYPE_FLOW        = 'text/plain;charset=UTF-8'
-FLOW_TRPC_BASE           = 'https://labs.google/fx/api/trpc'
 # (2026-08-14) Khớp `_CDN_FLOW_RE` phía backend (`backend/services/media_download.py`)
 # — trích UUID media THẬT từ CDN signed URL (`https://flow-content.google/
 # image/<uuid>?Expires=...` hoặc `.../video/<uuid>?...`). Dùng để lấy `name`
@@ -121,26 +106,6 @@ def _cookie_matches_domain(cookie_domain: str, target_domain: str) -> bool:
     return d == target_domain or d.endswith('.' + target_domain)
 
 
-CHECK_APP_AVAILABILITY_MARKER = ':checkAppAvailability'
-BATCH_LOG_FRONTEND_EVENTS_MARKER = 'batchLogFrontendEvents'
-CHECK_APP_CAPTURED_HEADERS = (
-    'priority', 'sec-ch-ua', 'sec-ch-ua-mobile', 'sec-ch-ua-platform',
-    'sec-fetch-dest', 'sec-fetch-mode', 'sec-fetch-site', 'user-agent',
-)
-DEFAULT_BROWSER_HEADERS = {
-    'priority': 'u=1, i',
-    'sec-fetch-dest': 'empty',
-    'sec-fetch-mode': 'cors',
-    'sec-fetch-site': 'cross-site',
-    'sec-ch-ua-mobile': '?0',
-    'sec-ch-ua-platform': '"Windows"',
-}
-TEMPLATE_BODY_MARKERS = (
-    CHECK_APP_AVAILABILITY_MARKER,
-    'flowMedia:batchGenerateImages',
-    'batchAsyncGenerateVideoText',
-    'batchAsyncGenerateVideo',
-)
 # (2026-08-12) MIME theo phần mở rộng — dùng khi tải lại `source_media` cho
 # luồng direct-API (upload qua /flow/uploadImage trước khi generate), mirror
 # ĐÚNG dict cục bộ trong `_dom_upload_images()` (giữ 2 bản riêng — 1 dict dùng
@@ -217,22 +182,69 @@ MODEL_MATCH_JS = """
 # option nào. Dùng chung 1 hàm cho cả 4 nhóm settings — chỉ khác aria-label +
 # danh sách text truyền vào.
 TOGGLE_MATCH_JS = """
-    var groupLabel = arguments[0], variants = arguments[1];
-    var group = document.querySelector('flow-toggles[aria-label="' + groupLabel + '"] mat-button-toggle-group');
-    if (!group) return null;
-    var btns = [...group.querySelectorAll('button[role="radio"]')];
-    var exact = btns.find(function(b){
-        var t = b.textContent.trim().replace(/\\s+/g,' ');
-        return variants.some(function(v){ return t===v; });
+    // (2026-09-24) arguments[0] = 1 nhãn HOẶC danh sách nhãn nhóm (mọi ngôn ngữ —
+    // Flow dịch aria-label theo ngôn ngữ tài khoản, vd "Mode"/"Chế độ").
+    // Biến thể dạng 'icon:xxx' khớp theo mat-icon (không phụ thuộc ngôn ngữ).
+    // Không thấy nhóm theo nhãn → quét MỌI nhóm (biến thể đủ đặc trưng).
+    var labels = Array.isArray(arguments[0]) ? arguments[0] : [arguments[0]];
+    var variants = arguments[1];
+    var groups = [];
+    labels.forEach(function(l){
+        var g = document.querySelector('flow-toggles[aria-label="' + l + '"] mat-button-toggle-group');
+        if (g) groups.push(g);
     });
-    if (exact) return exact;
-    return btns.find(function(b){
-        var t = b.textContent.trim().replace(/\\s+/g,' ');
-        return variants.some(function(v){ return t.includes(v); });
-    }) || null;
+    if (!groups.length) groups = [...document.querySelectorAll('flow-toggles mat-button-toggle-group')];
+    var btns = [];
+    groups.forEach(function(g){ btns = btns.concat([...g.querySelectorAll('button[role="radio"]')]); });
+    function iconOf(b){ var i = b.querySelector('mat-icon'); return i ? i.textContent.trim() : ''; }
+    function textOf(b){
+        var c = b.cloneNode(true);
+        c.querySelectorAll('mat-icon').forEach(function(i){ i.remove(); });
+        return c.textContent.trim().replace(/\\s+/g,' ');
+    }
+    function hit(b, exact){
+        return variants.some(function(v){
+            if (v.indexOf('icon:') === 0) return iconOf(b) === v.slice(5);
+            var t = textOf(b);
+            return exact ? t === v : t.includes(v);
+        });
+    }
+    return btns.find(function(b){ return hit(b, true); })
+        || btns.find(function(b){ return hit(b, false); }) || null;
 """
 
-# JS aisandbox — port từ tests/utils/flow_session.py (đã proven qua _test_textToImage.py).
+
+def _flow_btn_expr(key: str, fallback_js: str = 'null') -> str:
+    """(2026-09-24) Biểu thức JS trả về 1 nút của Flow theo `aria-label` — thử MỌI
+    biến thể ngôn ngữ trong `i18n_texts.json[key]` (Flow dịch aria-label theo
+    ngôn ngữ tài khoản: "Start generation" ↔ "Bắt đầu tạo"...), không thấy thì
+    dùng `fallback_js` (tìm theo component/icon, không phụ thuộc ngôn ngữ)."""
+    labels = json.dumps(get_i18n_texts().get(key) or [])
+    return ("(function(){var L=" + labels + ";"
+            "var b=[...document.querySelectorAll('button')].find(function(e){"
+            "return L.indexOf(e.getAttribute('aria-label')||'')>=0;});"
+            "return b || (" + fallback_js + ") || null;})()")
+
+
+def _flow_btn_js(key: str, fallback_js: str = 'null') -> str:
+    return 'return ' + _flow_btn_expr(key, fallback_js) + ';'
+
+
+def _prompt_box_btn_by_icon(test_js: str) -> str:
+    """JS dự phòng: nút trong ô nhập prompt (`flow-prompt-box`) có mat-icon thoả `test_js`
+    (biến `t` = text của icon)."""
+    return ("(function(){var p=document.querySelector('flow-prompt-box')||document;"
+            "return [...p.querySelectorAll('button')].find(function(b){"
+            "var i=b.querySelector('mat-icon'); var t=i?i.textContent.trim():'';"
+            "return " + test_js + ";});})()")
+
+
+_FB_SETTINGS = _prompt_box_btn_by_icon("/^crop_/.test(t)")
+_FB_SUBMIT   = "document.querySelector('flow-generate-icon-button button')"
+_FB_ADD_REF  = _prompt_box_btn_by_icon("t==='add'")
+_FB_MODEL    = "document.querySelector('flow-prompt-box-settings button[aria-haspopup=\"menu\"]')"
+
+# JS reCAPTCHA — port từ tests/utils/flow_session.py (đã proven qua _test_textToImage.py).
 # execute_async_script: callback `done` LUÔN là arguments[arguments.length-1],
 # KHÔNG phải arguments[0] (bug thật 2026-08-12: worker cũ gán done=arguments[0]
 # → siteKey bị hiểu thành 'VIDEO_GENERATION' → "Invalid site key ... VIDEO_GENERATION").
@@ -350,110 +362,8 @@ RECAPTCHA_FETCH_JS = """
     poll();
 """
 
-SESSION_FETCH_JS = """
-    var done = arguments[arguments.length - 1];
-    fetch(arguments[0], {
-        method: 'GET', credentials: 'include',
-        headers: { 'accept': '*/*', 'content-type': 'application/json' }
-    })
-    .then(function(r) {
-        if (!r.ok) return r.text().then(function(t) {
-            throw new Error('HTTP ' + r.status + ': ' + (t || '').slice(0, 200));
-        });
-        return r.json();
-    })
-    .then(function(data) {
-        done({
-            ok: true,
-            access_token: data.access_token || '',
-            email: (data.user && data.user.email) || '',
-            expires: data.expires || ''
-        });
-    })
-    .catch(function(e) { done({ ok: false, error: String(e) }); });
-"""
 
-BROWSER_HINTS_JS = """
-    var done = arguments[arguments.length - 1];
-    function formatBrands(brands) {
-        if (!brands || !brands.length) return '';
-        return brands.map(function(b) {
-            var ver = String(b.version || '').split('.')[0] || b.version;
-            return '"' + b.brand + '";v="' + ver + '"';
-        }).join(', ');
-    }
-    try {
-        var out = {
-            userAgent: navigator.userAgent || '',
-            secChUa: '',
-            secChUaMobile: '?0',
-            secChUaPlatform: '"Windows"'
-        };
-        var uad = navigator.userAgentData;
-        if (uad) {
-            out.secChUaMobile = uad.mobile ? '?1' : '?0';
-            if (uad.platform) out.secChUaPlatform = '"' + uad.platform + '"';
-            out.secChUa = formatBrands(uad.brands);
-            if (uad.getHighEntropyValues) {
-                uad.getHighEntropyValues(['brands', 'fullVersionList', 'mobile', 'platform'])
-                    .then(function(hv) {
-                        var brands = (hv.fullVersionList && hv.fullVersionList.length)
-                            ? hv.fullVersionList : (hv.brands || uad.brands);
-                        out.secChUa = formatBrands(brands) || out.secChUa;
-                        out.secChUaMobile = hv.mobile ? '?1' : '?0';
-                        out.secChUaPlatform = '"' + (hv.platform || 'Windows') + '"';
-                        done(out);
-                    })
-                    .catch(function() { done(out); });
-                return;
-            }
-        }
-        done(out);
-    } catch (e) {
-        done({ error: String(e), userAgent: navigator.userAgent || '' });
-    }
-"""
 
-BROWSER_FETCH_POST_JS = """
-    var url     = arguments[0];
-    var bodyStr = arguments[1];
-    var headers = arguments[2] || {};
-    var done    = arguments[arguments.length - 1];
-    // Forbidden request headers (origin/referer/ua/sec-*) set từ JS → Chrome
-    // bỏ qua hoặc làm fetch() ném TypeError: Failed to fetch (CORS preflight).
-    var blocked = {
-        origin:1, referer:1, 'user-agent':1, cookie:1, host:1, connection:1,
-        'content-length':1, 'sec-ch-ua':1, 'sec-ch-ua-mobile':1,
-        'sec-ch-ua-platform':1, 'sec-fetch-dest':1, 'sec-fetch-mode':1,
-        'sec-fetch-site':1, priority:1
-    };
-    var h = {};
-    Object.keys(headers).forEach(function(k) {
-        if (!blocked[String(k).toLowerCase()] && headers[k]) h[k] = headers[k];
-    });
-    fetch(url, {
-        method: 'POST',
-        headers: h,
-        body: bodyStr,
-        credentials: 'omit',
-        mode: 'cors',
-        cache: 'no-store'
-    })
-    .then(function(r) {
-        return r.text().then(function(t) {
-            done({
-                ok: r.ok,
-                status: r.status,
-                body: t,
-                contentType: r.headers.get('content-type') || '',
-                error: null
-            });
-        });
-    })
-    .catch(function(e) {
-        done({ ok: false, status: 0, body: '', contentType: '', error: String(e) });
-    });
-"""
 
 
 class ModelSelectionFailed(RuntimeError):
@@ -540,19 +450,10 @@ class SeleniumFlowWorker:
         self._batch_success_count        = 0
         self._consecutive_failed_batches = 0
         self._sleep_wipe_all_cookies     = False
-        # Tokens captured từ network traffic (chỉ dùng ở api mode)
+        self._sleep_skip_clean           = False
+        # reCAPTCHA gần nhất (tái dùng khi lần mint sau lỗi)
         self._tokens = {
-            'authorization':      None,
-            'xBrowserValidation': None,
-            'xClientData':        None,
-            'xBrowserChannel':    None,
-            'xBrowserYear':       None,
-            'xBrowserCopyright':  None,
-            'xGoogApiKey':        None,
-            'sessionId':          None,
             'recaptchaToken':     None,
-            'lastRequestBody':    None,
-            'capturedHeaders':    {},
             'capturedAt':         0.0,
         }
         self._client_hints_cache = None
@@ -732,7 +633,7 @@ class SeleniumFlowWorker:
         quiet=True → chỉ log khi lỗi (dùng cho heartbeat idle để tránh spam).
         Trả về dict JSON response hoặc raise exception.
         """
-        short = url.replace(FLOW_SERVER, '[FLOW]').replace(AISANDBOX_BASE, '[AI]')
+        short = url.replace(FLOW_SERVER, '[FLOW]')
         t0 = time.time()
         try:
             kw: dict = {'timeout': timeout}
@@ -776,6 +677,23 @@ class SeleniumFlowWorker:
 
         pid   = self.profile_id
         port  = _chrome_debug_port(pid)
+
+        # CloakBrowser — luồng RIÊNG (server/cloak_browser.py), không đi qua bất
+        # kỳ đoạn nào bên dưới. Tắt setting thì luồng cũ chạy y nguyên.
+        self._cloak_human = None
+        from .cloak_browser import cloak_enabled, open_cloak_driver, cloak_launch_config, CloakHuman
+        if cloak_enabled():
+            load_ext = self.worker_mode not in ('gemini', 'chatgpt', 'gemini_video', 'gemini_image')
+            driver = open_cloak_driver(self.profile, port, load_extensions=load_ext, log_fn=self._log)
+            try:
+                driver.execute_cdp_cmd('Network.enable', {})
+                driver.set_script_timeout(60)
+            except Exception:
+                pass
+            self._install_recaptcha_guard(driver)
+            if cloak_launch_config()['humanize']:
+                self._cloak_human = CloakHuman(driver)
+            return driver
 
         # Strategy 1: attach vào Chrome ĐANG SỐNG của profile này.
         # ⚠️ (2026-09-04) Điều kiện cũ CHỈ là `pid in _login_drivers` — dict RAM
@@ -951,146 +869,6 @@ class SeleniumFlowWorker:
 
     # ── Token capture từ Chrome performance logs ──────────────────────────────
 
-    @staticmethod
-    def _get_hdr(headers: dict, name: str) -> str:
-        """Đọc header không phân biệt hoa/thường — Chrome CDP không ổn định casing."""
-        lname = name.lower()
-        for k, v in (headers or {}).items():
-            if k.lower() == lname and v:
-                return v
-        return ''
-
-    @staticmethod
-    def _parse_session_id_from_body(url: str, body: dict) -> str:
-        """sessionId format `;{ms}` — ưu tiên batchLogFrontendEvents.events[].metadata.
-        Mirror tests/utils/flow_session.py::_parse_session_id_from_body()."""
-        if BATCH_LOG_FRONTEND_EVENTS_MARKER in url:
-            for ev in body.get('events') or []:
-                if not isinstance(ev, dict):
-                    continue
-                sid = (ev.get('metadata') or {}).get('sessionId') or ''
-                if sid.startswith(';'):
-                    return sid
-        sid = (body.get('clientContext') or {}).get('sessionId') or ''
-        if sid.startswith(';'):
-            return sid
-        for req in body.get('requests') or []:
-            if not isinstance(req, dict):
-                continue
-            sid = (req.get('clientContext') or {}).get('sessionId') or ''
-            if sid.startswith(';'):
-                return sid
-        return ''
-
-    def _apply_aisandbox_request(self, url: str, headers: dict, post_data: str = '') -> bool:
-        """Gộp headers aisandbox (requestWillBeSent + ExtraInfo) vào self._tokens.
-        Mirror tests/utils/flow_session.py::_apply_aisandbox_request()."""
-        changed = False
-        for hdr_name, dst in (
-            ('authorization', 'authorization'),
-            ('x-browser-validation', 'xBrowserValidation'),
-            ('x-client-data', 'xClientData'),
-            ('x-browser-channel', 'xBrowserChannel'),
-            ('x-browser-year', 'xBrowserYear'),
-            ('x-browser-copyright', 'xBrowserCopyright'),
-            ('x-goog-api-key', 'xGoogApiKey'),
-        ):
-            val = self._get_hdr(headers, hdr_name)
-            if val:
-                self._tokens[dst] = val
-                changed = True
-        cap = self._tokens.setdefault('capturedHeaders', {})
-        if CHECK_APP_AVAILABILITY_MARKER in url:
-            for hdr_name in CHECK_APP_CAPTURED_HEADERS:
-                val = self._get_hdr(headers, hdr_name)
-                if val:
-                    cap[hdr_name.lower()] = val
-                    changed = True
-        else:
-            sec_ua = self._get_hdr(headers, 'sec-ch-ua')
-            if sec_ua:
-                cap['sec-ch-ua'] = sec_ua
-                changed = True
-        if post_data:
-            try:
-                b = json.loads(post_data)
-                sid = self._parse_session_id_from_body(url, b)
-                if sid:
-                    prev = self._tokens.get('sessionId')
-                    self._tokens['sessionId'] = sid
-                    changed = True
-                    if BATCH_LOG_FRONTEND_EVENTS_MARKER in url and sid != prev:
-                        self._log('ok', f'batchLogFrontendEvents → sessionId: {sid}')
-                if any(m in url for m in TEMPLATE_BODY_MARKERS):
-                    rc = b.get('clientContext', {}).get('recaptchaContext', {}).get('token')
-                    if rc:
-                        self._tokens['recaptchaToken'] = rc
-                    self._tokens['lastRequestBody'] = post_data
-            except Exception:
-                pass
-        if changed and CHECK_APP_AVAILABILITY_MARKER in url:
-            if self._tokens.get('xBrowserValidation'):
-                self._log('ok', 'checkAppAvailability → captured fingerprint')
-            else:
-                self._log('warn', 'checkAppAvailability seen — thiếu x-browser-validation (chờ ExtraInfo)')
-            self._tokens['capturedAt'] = time.time()
-        elif changed:
-            self._tokens['capturedAt'] = time.time()
-        return changed
-
-    def _drain_perf_logs(self) -> bool:
-        """Đọc Chrome performance logs, trích headers từ aisandbox requests.
-
-        x-browser-validation / x-client-data (và đôi khi authorization trên Chrome
-        mới) nằm trong requestWillBeSentExtraInfo — worker cũ chỉ đọc
-        requestWillBeSent nên bỏ lỡ token. Mirror tests/utils/flow_session.py.
-
-        ⚠️ (2026-09-04) CHỈ lọc URL `aisandbox-pa.googleapis.com` → vô dụng
-        hoàn toàn khi chạy đường `batchexecute`. Bỏ qua sớm để khỏi đọc cả
-        buffer performance log ở 9 nơi gọi, mỗi task."""
-        if self._be_generate_enabled():
-            return False
-        if not self.driver:
-            return False
-        updated = False
-        sent: dict = {}
-        extra: dict = {}
-        try:
-            for entry in self.driver.get_log('performance'):
-                try:
-                    data   = json.loads(entry['message'])
-                    method = data.get('message', {}).get('method', '')
-                    params = data.get('message', {}).get('params', {})
-                except (json.JSONDecodeError, KeyError):
-                    continue
-
-                rid = params.get('requestId', '')
-                if method == 'Network.requestWillBeSent':
-                    req = params.get('request', {})
-                    url = req.get('url', '')
-                    if 'aisandbox-pa.googleapis.com' not in url:
-                        continue
-                    sent[rid] = {
-                        'url': url,
-                        'headers': req.get('headers', {}) or {},
-                        'postData': req.get('postData', '') or '',
-                    }
-                elif method == 'Network.requestWillBeSentExtraInfo' and rid:
-                    extra[rid] = params.get('headers', {}) or {}
-
-            for rid, info in sent.items():
-                headers = dict(info['headers'])
-                if rid in extra:
-                    headers.update(extra[rid])
-                if self._apply_aisandbox_request(info['url'], headers, info['postData']):
-                    updated = True
-            if updated and self._tokens.get('authorization'):
-                auth_preview = (self._tokens['authorization'] or '')[:30]
-                self._log('ok', f'Tokens captured — auth={auth_preview}…')
-        except Exception as e:
-            self._log('warn', f'Drain perf logs: {e}')
-        return updated
-
     def _drain_browser_logs(self):
         """Đọc Chrome browser console logs và ghi vào profile log file."""
         if not self.driver:
@@ -1156,207 +934,10 @@ class SeleniumFlowWorker:
             return token
         return self._tokens.get('recaptchaToken') or ''
 
-    def _fetch_labs_session(self) -> bool:
-        """GET /fx/api/auth/session từ tab labs.google (credentials:include) —
-        nguồn authorization CHÍNH của _test_textToImage.py, không phụ thuộc
-        Chrome vừa có request aisandbox hay không. KHÔNG dùng proxy."""
-        if not self.driver:
-            return False
-        try:
-            info = self._js_async(SESSION_FETCH_JS, LABS_SESSION_URL, timeout=20)
-        except Exception as e:
-            self._log('warn', f'session API: {e}')
-            return False
-        if not info or not info.get('ok'):
-            self._log('warn', f'session API: {(info or {}).get("error") or "failed"}')
-            return False
-        access = info.get('access_token') or ''
-        if not access:
-            self._log('warn', 'session API thiếu access_token')
-            return False
-        self._tokens['authorization'] = (
-            access if access.startswith('Bearer ') else f'Bearer {access}'
-        )
-        self._tokens['capturedAt'] = time.time()
-        self._log('ok', f'Session {info.get("email", "")}  '
-                         f'Auth={(self._tokens["authorization"] or "")[:44]}…')
-        return True
-
-    def _capture_tb_credentials(self) -> bool:
-        """Đọc window.__tbCredentials nếu Flow extension đã inject (không bắt buộc).
-        Mirror tests/utils/flow_session.py::_capture_tb_credentials() — KHÔNG proxy."""
-        if not self.driver:
-            return False
-        try:
-            creds = self.driver.execute_script('return window.__tbCredentials || null;')
-        except Exception:
-            return False
-        if not creds or not isinstance(creds, dict):
-            return False
-        changed = False
-        for src, dst in (
-            ('authorization', 'authorization'),
-            ('xBrowserValidation', 'xBrowserValidation'),
-            ('xClientData', 'xClientData'),
-            ('xBrowserChannel', 'xBrowserChannel'),
-            ('xBrowserYear', 'xBrowserYear'),
-            ('xGoogApiKey', 'xGoogApiKey'),
-            ('sessionId', 'sessionId'),
-            ('lastRequestBody', 'lastRequestBody'),
-        ):
-            if creds.get(src):
-                self._tokens[dst] = creds[src]
-                changed = True
-        if changed:
-            self._tokens['capturedAt'] = time.time()
-        return changed
-
-    def has_tokens(self) -> bool:
-        """Chỉ authorization — UI-driven fallback vẫn chạy khi thiếu fingerprint."""
-        return bool(self._tokens.get('authorization'))
-
-    def can_generate_via_api(self) -> bool:
-        """Đủ điều kiện gọi API generate chưa (dùng cho các cổng chặn TRƯỚC khi
-        gọi `_call_image_api_v2()`/`_call_video_api()`).
-
-        ⚠️ (2026-09-04) PHẢI dùng hàm này thay `has_tokens()` ở đường generate.
-        `has_tokens()` chỉ hỏi "có bearer token của aisandbox chưa" — đường
-        `batchexecute` KHÔNG BAO GIỜ hái token đó (không cần), nên
-        `has_tokens()` luôn False. Bug thật vừa mắc: sau khi chặn
-        `_ensure_api_ready()`, mọi task VIDEO raise "Chưa có API token cho
-        video generation" và mọi task ẢNH bị đẩy hết sang nhánh UI-driven
-        chậm — dù đường mới hoàn toàn chạy được."""
-        return True if self._be_generate_enabled() else self.has_tokens()
-
-    def has_session_id(self) -> bool:
-        sid = self._tokens.get('sessionId') or ''
-        return sid.startswith(';') and len(sid) > 2
-
-    def has_browser_fingerprint(self) -> bool:
-        """XBV + x-client-data do Chrome inject ở ExtraInfo (checkAppAvailability)."""
-        return bool(
-            self._tokens.get('xBrowserValidation')
-            and self._tokens.get('xClientData')
-        )
-
-    def has_api_ready(self) -> bool:
-        """Đủ POST aisandbox như `_test`: auth + fingerprint. sessionId có fallback ;timestamp."""
-        return self.has_tokens() and self.has_browser_fingerprint()
-
     def token_age_secs(self) -> float:
         if not self._tokens['capturedAt']:
             return 9999.0
         return time.time() - self._tokens['capturedAt']
-
-    def _log_api_sync_progress(self):
-        parts = [
-            'auth✓' if self.has_tokens() else 'auth…',
-            'checkApp✓' if self.has_browser_fingerprint() else 'checkApp…',
-            'batchLog✓' if self.has_session_id() else 'batchLog…',
-        ]
-        self._log('info', f'  sync API [{" | ".join(parts)}]')
-
-    def _log_api_sync_done(self):
-        self._log('ok', 'Project APIs đủ — sẵn sàng gửi prompt')
-        xbv = self._tokens.get('xBrowserValidation') or ''
-        if xbv:
-            self._log('ok', f'x-browser-validation: {xbv[:32]}…')
-        xcd = self._tokens.get('xClientData') or ''
-        if xcd:
-            self._log('ok', f'x-client-data: {xcd[:48]}{"…" if len(xcd) > 48 else ""}')
-        if self.has_session_id():
-            self._log('ok', f'sessionId: {self._tokens["sessionId"]}')
-
-    def _sync_project_apis(self, timeout: float = 90) -> bool:
-        """Tuần tự capture khi ở project page — khớp `_test_textToImage.py` /
-        FlowBrowserSession._sync_project_apis(), CHỈ BỎ proxy + token disk cache:
-          1. labs session / authorization
-          2. v1:checkAppAvailability → fingerprint
-          3. flow:batchLogFrontendEvents → sessionId
-        """
-        if not self.driver:
-            return False
-        self._log('info', 'Sync API project (auth → checkApp → batchLog)…')
-        deadline = time.time() + timeout
-        reloaded = False
-        last_progress = 0.0
-
-        while time.time() < deadline:
-            if self._stop.is_set():
-                return False
-            self._drain_perf_logs()
-            self._capture_tb_credentials()
-
-            if not self.has_tokens():
-                self._fetch_labs_session()
-
-            if self.has_tokens() and self.has_browser_fingerprint() and self.has_session_id():
-                self._log_api_sync_done()
-                self._last_api_sync_at = time.time()
-                return True
-
-            now = time.time()
-            if now - last_progress >= 8:
-                self._log_api_sync_progress()
-                last_progress = now
-
-            if (
-                not reloaded
-                and now > deadline - timeout * 0.4
-                and (not self.has_browser_fingerprint() or not self.has_session_id())
-            ):
-                try:
-                    self._nav_refresh('sync API aisandbox: quá 60% timeout vẫn thiếu fingerprint/'
-                                      'sessionId — reload để Flow gọi lại checkApp + batchLog')
-                except Exception:
-                    pass
-                self._sleep(2.5)
-                reloaded = True
-
-            try:
-                self.driver.execute_script(
-                    'window.scrollBy(0, arguments[0]);', random.randint(30, 120)
-                )
-            except Exception:
-                pass
-            self._sleep(0.7)
-
-        ok = self.has_tokens() and self.has_browser_fingerprint()
-        self._last_api_sync_at = time.time()
-        if ok:
-            self._log('warn', 'Partial sync — thiếu sessionId (POST sẽ fallback ;timestamp)')
-        else:
-            self._log_api_sync_progress()
-            self._log('warn', 'Timeout sync project APIs')
-        return ok
-
-    def _ensure_api_ready(self, timeout: float = 45):
-        """Trước POST generate: đảm bảo auth + fingerprint như `_test`.
-        sessionId thiếu thì flow_api._session_id() tự fallback `;{ms}`.
-        Không sync lại nếu vừa sync < 30s (tránh stall 45s mỗi uploadImage trong lô).
-
-        ⚠️ (2026-09-04) Toàn bộ việc này CHỈ phục vụ đường `aisandbox` (bearer
-        token + fingerprint). Đường `batchexecute` không cần gì trong đây, mà
-        `_fetch_labs_session()` bên trong còn gọi `/fx/api/auth/session` của
-        `labs.google` — từ trang `flow.google.com` là CROSS-ORIGIN nên CORS
-        chặn, đẻ ra spam log `session API: TypeError: Failed to fetch` (bug
-        thật, log máy user 08:59). Chặn ngay ở đây — 1 chỗ duy nhất, phủ hết
-        MỌI call site (kể cả sau này thêm mới), thay vì vá từng nơi."""
-        if self._be_generate_enabled():
-            return
-        self._capture_tb_credentials()
-        self._drain_perf_logs()
-        if self.has_tokens() and self.has_browser_fingerprint() and self.has_session_id():
-            return
-        if not self.has_api_ready() and (time.time() - self._last_api_sync_at) > 30:
-            self._log('info', 'Thiếu token/fingerprint/sessionId — sync lại API project…')
-            self._sync_project_apis(timeout=timeout)
-        if not self.has_tokens():
-            raise RuntimeError(
-                'Chưa có API token (authorization) — session labs.google chưa sẵn sàng'
-            )
-        if not self.has_browser_fingerprint():
-            self._log('warn', 'Thiếu x-browser-validation/x-client-data — POST vẫn thử (có thể 403)')
 
     # ── Flow page management ─────────────────────────────────────────────────
 
@@ -1571,7 +1152,7 @@ class SeleniumFlowWorker:
         Trả `set` (có thể rỗng) khi đọc được; `None` khi KHÔNG kiểm tra được
         (đường batchexecute đang tắt, không có session, RPC lỗi) — caller phân
         biệt "đã tra mà không thấy" với "không tra được"."""
-        if not project_id or not self._be_generate_enabled():
+        if not project_id:
             return None
         lock = getattr(self, '_flow_listing_lock', None) or threading.Lock()
         with lock:
@@ -1902,273 +1483,9 @@ class SeleniumFlowWorker:
             return
         self._try_reuse_or_bootstrap_project()
 
-    def _trigger_page_requests(self):
-        """Warm-up trang Flow để tự gọi checkApp + batchLog — khớp
-        FlowBrowserSession.warm_up_page()."""
-        try:
-            for y in (120, 280, 80, 0):
-                self.driver.execute_script(f'window.scrollTo(0, {y});')
-                self._sleep(0.5)
-        except Exception:
-            pass
-        self._sleep(1.5)
-        self._drain_perf_logs()
-        self._capture_tb_credentials()
-
-    def _wait_for_tokens(self, timeout=60) -> bool:
-        """Chờ auth + fingerprint + sessionId. Mirror `_test` `_sync_project_apis`."""
-        return self._sync_project_apis(timeout=timeout)
-
     # ── Build API request ────────────────────────────────────────────────────
 
-    def _sec_ch_ua_from_capabilities(self) -> str:
-        """Fallback khi JS/perf log không có sec-ch-ua."""
-        try:
-            ver = ''
-            if self.driver:
-                caps = getattr(self.driver, 'capabilities', {}) or {}
-                ver = caps.get('browserVersion') or caps.get('version') or ''
-            major = (ver.split('.')[0] if ver else '') or '131'
-            return (
-                f'"Google Chrome";v="{major}", "Chromium";v="{major}", '
-                f'"Not)A;Brand";v="24"'
-            )
-        except Exception:
-            return ''
-
-    def _read_browser_client_hints(self) -> dict:
-        """sec-ch-ua từ Chrome đang chạy (navigator.userAgentData).
-        Mirror tests/utils/flow_session.py::_read_browser_client_hints()."""
-        if self._client_hints_cache and self._client_hints_cache.get('secChUa'):
-            return self._client_hints_cache
-        info = {}
-        if self.driver:
-            try:
-                info = self._js_async(BROWSER_HINTS_JS, timeout=8) or {}
-            except Exception:
-                info = {}
-            if not info.get('secChUa'):
-                try:
-                    sync = self.driver.execute_script("""
-                        var uad = navigator.userAgentData;
-                        if (!uad || !uad.brands) return null;
-                        return uad.brands.map(function(b) {
-                            var v = String(b.version || '').split('.')[0];
-                            return '"' + b.brand + '";v="' + v + '"';
-                        }).join(', ');
-                    """)
-                    if sync:
-                        info['secChUa'] = sync
-                except Exception:
-                    pass
-            if not info.get('userAgent'):
-                try:
-                    info['userAgent'] = self.driver.execute_script(
-                        'return navigator.userAgent || "";'
-                    )
-                except Exception:
-                    info['userAgent'] = ''
-        if not info.get('secChUa'):
-            info['secChUa'] = self._sec_ch_ua_from_capabilities()
-        self._client_hints_cache = {
-            'secChUa': info.get('secChUa') or '',
-            'secChUaMobile': info.get('secChUaMobile') or '?0',
-            'secChUaPlatform': info.get('secChUaPlatform') or '"Windows"',
-            'userAgent': info.get('userAgent') or '',
-        }
-        return self._client_hints_cache
-
-    def _merge_browser_headers(self, h: dict) -> None:
-        """Headers giống checkAppAvailability + sec-ch-ua live từ Chrome.
-        curl_cffi không tự inject các header này — thiếu thì Google 403."""
-        cap = self._tokens.get('capturedHeaders') or {}
-        for key, default in DEFAULT_BROWSER_HEADERS.items():
-            val = cap.get(key) or default
-            if val:
-                h[key] = val
-        hints = self._read_browser_client_hints()
-        sec_ch_ua = (
-            hints.get('secChUa')
-            or cap.get('sec-ch-ua')
-            or self._sec_ch_ua_from_capabilities()
-        )
-        if sec_ch_ua:
-            h['sec-ch-ua'] = sec_ch_ua
-        if not cap.get('sec-ch-ua-mobile') and hints.get('secChUaMobile'):
-            h['sec-ch-ua-mobile'] = hints['secChUaMobile']
-        if not cap.get('sec-ch-ua-platform') and hints.get('secChUaPlatform'):
-            h['sec-ch-ua-platform'] = hints['secChUaPlatform']
-        ua = cap.get('user-agent') or hints.get('userAgent') or ''
-        if ua:
-            h['user-agent'] = ua
-
-    def _build_headers(self) -> dict:
-        """Headers khớp tests/utils/flow_session.py::build_headers() — content-type
-        `text/plain;charset=UTF-8` (KHÔNG phải application/json), có x-goog-api-key
-        + fingerprint ExtraInfo + sec-ch-ua từ Chrome đang chạy."""
-        t = self._tokens
-        h = {
-            'accept': '*/*',
-            'accept-language': 'vi-VN,en-US;q=0.9,en;q=0.8',
-            'authorization': t.get('authorization') or '',
-            'content-type': CONTENT_TYPE_FLOW,
-            'origin': 'https://labs.google',
-            'referer': 'https://labs.google/',
-            'x-browser-channel': t.get('xBrowserChannel') or 'stable',
-            'x-browser-year': t.get('xBrowserYear') or '2026',
-            'x-browser-copyright': t.get('xBrowserCopyright') or X_BROWSER_COPYRIGHT,
-            'x-goog-api-key': t.get('xGoogApiKey') or DEFAULT_GOOG_API_KEY,
-        }
-        if t.get('xBrowserValidation'):
-            h['x-browser-validation'] = t['xBrowserValidation']
-        if t.get('xClientData'):
-            h['x-client-data'] = t['xClientData']
-        self._merge_browser_headers(h)
-        return h
-
-    @staticmethod
-    def _headers_for_page_fetch(headers: dict) -> dict:
-        """JS `fetch()` không được set forbidden headers. `x-browser-validation` /
-        `x-client-data` Chrome tự inject ở network layer — copy vào fetch() từ
-        script kích hoạt CORS preflight fail → `TypeError: Failed to fetch`
-        (đúng log production 18:52 uploadImage)."""
-        allowed = {
-            'accept', 'accept-language', 'authorization', 'content-type',
-            'x-goog-api-key', 'x-browser-channel', 'x-browser-year',
-            'x-browser-copyright',
-        }
-        return {k: v for k, v in (headers or {}).items()
-                if k.lower() in allowed and v}
-
-    @staticmethod
-    def _build_curl_command(url: str, headers: dict, payload: str) -> str:
-        """Dựng chuỗi `curl` TƯƠNG ĐƯƠNG 1 request aisandbox — copy-paste thẳng
-        vào terminal để tái hiện request y hệt (debug lúc bị 400/lỗi khó hiểu).
-        Dùng bởi `_post_aisandbox()` khi setting `debug_log_curl` bật.
-
-        ⚠️ KHÔNG che header `authorization` — log này lộ bearer token thật của
-        phiên đang chạy, chỉ nên bật tạm lúc debug, không chia sẻ log ra ngoài."""
-        def _q(s) -> str:
-            return "'" + str(s).replace("'", "'\\''") + "'"
-        parts = [f'curl -sS -X POST {_q(url)}']
-        for k, v in (headers or {}).items():
-            if v:
-                parts.append(f'-H {_q(f"{k}: {v}")}')
-        parts.append(f'--data-raw {_q(payload)}')
-        return ' \\\n  '.join(parts)
-
-    def _debug_log_curl_enabled(self) -> bool:
-        return bool(self._server_settings.get('debug_log_curl'))
-
-    def _post_via_curl_cffi(self, url: str, payload: str, headers: dict, timeout: int) -> dict:
-        """POST aisandbox bằng curl_cffi impersonate Chrome — KHÔNG SOCKS/proxy.
-        Đây là đường đã proven ở `_test_ingredientToVideo.py` (page fetch CORS
-        fail, curl_cffi HTTP 200)."""
-        if not HAS_CFFI:
-            raise RuntimeError('curl_cffi chưa cài — pip install curl_cffi')
-        debug_curl = self._debug_log_curl_enabled()
-        last_err = None
-        for imp in ('chrome131', 'chrome136', 'chrome124', 'chrome'):
-            try:
-                r = cf_requests.post(
-                    url, headers=headers, data=payload.encode('utf-8'),
-                    impersonate=imp, timeout=timeout,
-                )
-                if debug_curl:
-                    self._log('info', f'[curl-debug] Response HTTP {r.status_code} '
-                                       f'(curl_cffi/{imp}) — body đầy đủ:\n{r.text}')
-                if r.ok:
-                    self._log('info', f'POST aisandbox HTTP {r.status_code} (via curl_cffi/{imp})')
-                    return r.json() if r.text else {}
-                last_err = f'HTTP {r.status_code}: {(r.text or "")[:300]}'
-                self._log('warn', f'curl_cffi/{imp} {last_err}')
-            except Exception as e:
-                last_err = str(e)
-                self._log('warn', f'curl_cffi/{imp}: {e}')
-        raise RuntimeError(f'aisandbox POST thất bại (curl_cffi): {last_err}')
-
-    def _post_aisandbox(self, url: str, body: dict, timeout: int = 90) -> dict:
-        """POST aisandbox — khớp `_test_textToImage.py` / `_test_ingredientToVideo.py`.
-
-        1. `curl_cffi` impersonate Chrome, KHÔNG proxy (đường production ổn định)
-        2. fallback `fetch()` từ tab labs.google (header đã lọc, không set
-           origin/ua/sec-*/x-browser-validation — tránh CORS Failed to fetch)
-
-        Page fetch làm PRIMARY đã fail thật (2026-08-12 18:52): mọi uploadImage
-        `TypeError: Failed to fetch` HTTP 0. Script test cùng ngày cũng timeout
-        extension proxy rồi thành công nhờ curl_cffi.
-
-        (2026-08-13, theo yêu cầu user "thêm bật ghi lại log curl đầy đủ khi
-        gọi tạo video/image qua api") — setting `debug_log_curl` (mặc định
-        TẮT, Cài đặt cục bộ) bật thì LUÔN log 1 lệnh `curl` copy-paste được
-        (URL + mọi header + body JSON nguyên văn, xem `_build_curl_command()`)
-        NGAY TRƯỚC KHI gửi request — dùng CHUNG cho MỌI call đi qua hàm này
-        (uploadImage, batchGenerateImages, cả 3 endpoint video), không riêng
-        gì generate — và response body ĐẦY ĐỦ (không cắt 300 ký tự như log lỗi
-        mặc định) ngay sau khi nhận về, cả 2 nhánh curl_cffi lẫn page-fetch.
-        """
-        self._ensure_api_ready(timeout=45)
-        headers = self._build_headers()
-        if not headers.get('authorization'):
-            raise RuntimeError('Chưa có API token (authorization) — session labs.google chưa sẵn sàng')
-        payload = json.dumps(body, separators=(',', ':'), ensure_ascii=False)
-
-        debug_curl = self._debug_log_curl_enabled()
-        if debug_curl:
-            self._log('info', f'[curl-debug] Request:\n{self._build_curl_command(url, headers, payload)}')
-
-        if HAS_CFFI:
-            try:
-                return self._post_via_curl_cffi(url, payload, headers, timeout)
-            except Exception as e:
-                self._log('warn', f'curl_cffi: {e} — thử page fetch…')
-
-        try:
-            result = self._js_async(
-                BROWSER_FETCH_POST_JS, url, payload, self._headers_for_page_fetch(headers),
-                timeout=timeout + 15,
-            ) or {}
-        except Exception as e:
-            raise RuntimeError(f'aisandbox POST (browser fetch) thất bại: {e}') from e
-
-        if debug_curl:
-            self._log('info', f'[curl-debug] Response HTTP {result.get("status")} '
-                               f'(browser_fetch) — body đầy đủ:\n'
-                               f'{result.get("body") or result.get("error") or ""}')
-
-        if result.get('ok'):
-            self._log('info', f'POST aisandbox HTTP {result.get("status")} (via browser_fetch)')
-            return json.loads(result.get('body') or '{}')
-        err = result.get('error') or ''
-        st = result.get('status', 0)
-        preview = (result.get('body') or err or '')[:300]
-        raise RuntimeError(f'aisandbox POST thất bại HTTP {st}: {preview}')
-
     # ── UI-driven image generation (Selenium + fetch interceptor) ─────────────
-
-    def _install_gen_interceptor(self):
-        """Cài JS fetch interceptor để capture response từ batchGenerateImages."""
-        self.driver.execute_script("""
-            if (!window.__genInterceptorInstalled) {
-                window.__genInterceptorInstalled = true;
-                window.__genCaptures = [];
-                var _prev = window.fetch;
-                window.fetch = async function(input, init) {
-                    var url = typeof input === 'string' ? input : (input && input.url) || String(input);
-                    if (url.includes('batchGenerateImages') || url.includes('batchAsyncGenerate')) {
-                        var call = {url: url, method: (init&&init.method)||'GET',
-                                    ts: Date.now(), response_status: null, response_body: null};
-                        window.__genCaptures.push(call);
-                        var resp = await _prev.apply(this, arguments);
-                        call.response_status = resp.status;
-                        try { call.response_body = await resp.clone().text(); } catch(e) {}
-                        return resp;
-                    }
-                    return _prev.apply(this, arguments);
-                };
-            }
-            window.__genCaptureStart = (window.__genCaptures || []).length;
-        """)
 
     def _click_new_project_button(self, timeout: int = 15) -> bool:
         """Trên trang chung labs.google/fx/.../tools/flow (chưa vào project nào cả),
@@ -2822,7 +2139,6 @@ class SeleniumFlowWorker:
             self._log('error', 'Không thể tiếp tục — đăng nhập Google thất bại/chưa cấu '
                                 'hình. Xem log [google-login] ở trên để biết chi tiết.')
             return
-        self._drain_perf_logs()
 
         # (2026-08-10) Navigate THẲNG tới URL project cụ thể đôi khi bị chặn
         # bởi màn hình xen giữa bắt bấm "Create with Google Flow" — URL vẫn
@@ -2841,7 +2157,6 @@ class SeleniumFlowWorker:
                 self._nav_get(target, 'sau bước "Create with Google Flow" không còn ở /project/ — '
                                       'quay lại project')
                 self._sleep(4)
-                self._drain_perf_logs()
 
         # Nếu target không có /project/ (rơi vào FLOW_PROJECT_URL) hoặc project_url cũ
         # đã hết hạn/bị xoá (Google tự redirect về trang chung) — trang chung KHÔNG tự
@@ -2860,115 +2175,6 @@ class SeleniumFlowWorker:
                 return
             self._try_reuse_or_bootstrap_project()
 
-    def _generate_image_via_ui(self, task: dict) -> list:
-        """Generate ảnh bằng CDP (100% bypass DOM): insertText + keyEvent Enter.
-        Intercept response qua JS fetch interceptor window.__genCaptures.
-        Trả về list [{type:'image', url:fifeUrl}]
-        """
-        prompt = (task.get('prompt_text') or task.get('title') or '').strip()
-        if not prompt:
-            raise RuntimeError('Không có prompt cho image generation')
-
-        # Đảm bảo đang ở project page
-        self._ensure_flow_project()
-
-        # Cài interceptor + mark start index
-        self._install_gen_interceptor()
-        start_idx = self.driver.execute_script("return window.__genCaptureStart || 0;")
-
-        # Tìm textarea bằng JS (không dùng WebDriverWait/By)
-        textarea = None
-        for _ in range(20):
-            textarea = self.driver.execute_script(
-                "return document.querySelector('div[role=\"textbox\"]')"
-                " || document.querySelector('[contenteditable=\"true\"]');"
-            )
-            if textarea:
-                break
-            self._sleep(1)
-        if not textarea:
-            raise RuntimeError('Prompt textarea not found after 20s')
-
-        # Click qua CDP mouse event (không dùng .click())
-        r = self.driver.execute_script(
-            "var r=arguments[0].getBoundingClientRect();"
-            "return {x:r.left+r.width/2,y:r.top+r.height/2};", textarea)
-        cx, cy = int(r['x']), int(r['y'])
-        for etype in ('mousePressed', 'mouseReleased'):
-            self.driver.execute_cdp_cmd('Input.dispatchMouseEvent', {
-                'type': etype, 'x': cx, 'y': cy, 'button': 'left', 'clickCount': 1,
-            })
-        self._sleep(0.3)
-
-        # Nhập text qua CDP Input.insertText (bypass send_keys hoàn toàn)
-        # 20 ký tự đầu char-by-char giả lập gõ tay, phần còn lại bulk
-        head, rest = prompt[:20], prompt[20:]
-        for ch in head:
-            self.driver.execute_cdp_cmd('Input.insertText', {'text': ch})
-            self._sleep(0.07 + random.random() * 0.10)
-        if rest:
-            self._sleep(0.1)
-            self.driver.execute_cdp_cmd('Input.insertText', {'text': rest})
-        self._sleep(0.5)
-
-        # Submit bằng CDP keyEvent Enter (không dùng Keys.RETURN)
-        self._log('info', f'Submit prompt (CDP): "{prompt[:50]}"')
-        for ktype in ('keyDown', 'keyUp'):
-            self.driver.execute_cdp_cmd('Input.dispatchKeyEvent', {
-                'type': ktype, 'key': 'Enter', 'code': 'Enter', 'keyCode': 13,
-            })
-
-        # Poll tối đa 90s cho đến khi có response
-        deadline = time.time() + 90
-        while time.time() < deadline:
-            self._sleep(2)
-            try:
-                caps = self.driver.execute_script("""
-                    var start = arguments[0] || 0;
-                    var caps = window.__genCaptures || [];
-                    return caps.slice(start).filter(function(c) {
-                        return c.response_status !== null;
-                    });
-                """, start_idx)
-
-                errors = [c for c in caps
-                          if c.get('response_status') and c['response_status'] != 200]
-                if errors:
-                    err_body = (errors[0].get('response_body') or '')[:300]
-                    raise RuntimeError(f'API lỗi {errors[0]["response_status"]}: {err_body}')
-
-                done = [c for c in caps
-                        if c.get('response_status') == 200 and c.get('response_body')]
-                if done:
-                    urls = []
-                    for cap in done:
-                        try:
-                            data = json.loads(cap['response_body'])
-                            for m in data.get('media', []):
-                                fife = (m.get('image', {})
-                                         .get('generatedImage', {})
-                                         .get('fifeUrl', ''))
-                                if fife:
-                                    # (2026-08-14) Trích luôn `media.name` (uuid
-                                    # THẬT của Google, khác nhau mỗi lần generate)
-                                    # — cùng field `parse_image_results()` (Direct
-                                    # API) đã lấy sẵn, trước đây nhánh UI-driven
-                                    # này BỎ QUA hoàn toàn, khiến caller phải tự
-                                    # chế tên cố định → gây bug dedup-nhầm khi
-                                    # regenerate (xem `_run_task_api()`).
-                                    urls.append({'type': 'image', 'url': fife, 'name': m.get('name', '')})
-                        except Exception as pe:
-                            self._log('warn', f'Parse gen response: {pe}')
-                    if urls:
-                        self._log('ok', f'{len(urls)} image URL(s) captured')
-                        return urls
-            except RuntimeError:
-                raise
-            except Exception as e:
-                self._log('warn', f'Poll gen response: {e}')
-
-        raise RuntimeError('Image generation timeout (90s)')
-
     # ── Direct API calls ──────────────────────────────────────────────────────
 
     def _extract_project_id(self) -> str:
@@ -2977,14 +2183,6 @@ class SeleniumFlowWorker:
         url = (self.profile.get('project_url') or '').strip()
         m = re.search(r'/project/([0-9a-f-]{36})', url)
         return m.group(1) if m else ''
-
-    def _call_image_api(self, task: dict, captcha: str) -> list:
-        """DEPRECATED — endpoint cũ batchGenerateImages đã 404.
-        Dùng _call_image_api_v2() hoặc _generate_image_via_ui() thay thế."""
-        raise RuntimeError(
-            'Endpoint cũ /v1:batchGenerateImages đã bị xóa. '
-            'Dùng _call_image_api_v2() (endpoint mới) hoặc _generate_image_via_ui() thay thế.'
-        )
 
     def _parse_source_media(self, task: dict) -> list:
         """Parse task['source_media'] (JSON string hoặc list) → list dict chuẩn
@@ -3107,25 +2305,11 @@ class SeleniumFlowWorker:
         return names
 
     def _upload_media_to_flow(self, image_bytes: bytes, filename: str, mime_type: str) -> str:
-        """Upload 1 ảnh tham chiếu qua POST /flow/uploadImage — trả media.name
-        (uuid). KHÔNG cần recaptcha (xem flow_api.UPLOAD_IMAGE)."""
-        if self._be_generate_enabled():
-            name = self._upload_media_to_flow_be(image_bytes, filename, mime_type)
-            if not name:
-                raise RuntimeError(self._be_fail_msg('Upload ảnh tham chiếu'))
-            return name
-
-        # ══ ĐƯỜNG CŨ aisandbox — ĐÃ CẤT, chỉ chạy khi setting
-        # `generate_via_batchexecute` = 0. Giữ lại nguyên vẹn để lấy lại khi
-        # cần, KHÔNG chạy song song với batchexecute (yêu cầu user 2026-09-04).
-        project_id = self._extract_project_id()
-        b64  = base64.b64encode(image_bytes).decode()
-        body = flow_api.build_upload_image_body(project_id, b64, file_name=filename, mime_type=mime_type)
-        url  = flow_api.UPLOAD_IMAGE.url()
-        data = self._post_aisandbox(url, body, timeout=60)
-        media_name = flow_api.parse_uploaded_image_name(data)
-        self._log('info', f'  ✔ uploadImage → media.name={media_name} ({filename}, {len(image_bytes)}B)')
-        return media_name
+        """Upload 1 ảnh tham chiếu qua batchexecute (`maseQ`) — trả media.name (uuid)."""
+        name = self._upload_media_to_flow_be(image_bytes, filename, mime_type)
+        if not name:
+            raise RuntimeError(self._be_fail_msg('Upload ảnh tham chiếu'))
+        return name
 
     def _prepare_video_uploads(self, task: dict) -> list:
         """Tải + upload hết ảnh đính kèm của 1 task video. Trả list `media.name`
@@ -3173,59 +2357,10 @@ class SeleniumFlowWorker:
         ÂM THẦM BỎ QUA vì `source_media[].data` không tồn tại, chỉ có `.url`).
         Trả list [{type:'image', url:fifeUrl}] hoặc raise RuntimeError.
         """
-        if self._be_generate_enabled():
-            be_results = self._call_image_api_be(task, captcha)
-            if not be_results:
-                raise RuntimeError(self._be_fail_msg('Tạo ảnh'))
-            return be_results
-
-        # ══ ĐƯỜNG CŨ aisandbox — ĐÃ CẤT, chỉ chạy khi setting
-        # `generate_via_batchexecute` = 0. Giữ lại nguyên vẹn để lấy lại khi
-        # cần, KHÔNG chạy song song với batchexecute (yêu cầu user 2026-09-04).
-        project_id = self._extract_project_id()
-        if not project_id:
-            raise RuntimeError('Không tìm được project ID từ project_url (cần dạng /project/{uuid})')
-
-        source_media = self._parse_source_media(task)
-        image_inputs = [flow_api.build_image_input_ref(n)
-                        for n in self._upload_source_media_cached(source_media)]
-
-        # (2026-08-13) task.get('model') là TÊN HIỂN THỊ GUI (vd "Nano Banana
-        # Pro"), KHÔNG PHẢI imageModelName thật — gửi thẳng gây 400
-        # INVALID_ARGUMENT (bug thật, task #2454). model_catalog.resolve_image_model()
-        # ưu tiên tra `veo_models.model_key` (backend, source of truth — theo
-        # yêu cầu user "thêm model_key vào database để truy vấn từ veo_models
-        # cho chuẩn"), fallback dict hardcode cục bộ (flow_api.py) nếu backend
-        # không tới được hoặc cột DB trống.
-        image_model, model_src = model_catalog.resolve_image_model(task.get('model'))
-        # (2026-08-13, theo yêu cầu user "log thêm mã model đi theo tên model để
-        # biết lấy đúng ko") — LUÔN log tên↔mã (không chỉ lúc fallback) để dễ tự
-        # kiểm tra bằng mắt model được chọn đúng chưa, khớp pattern đã có ở nhánh
-        # video (`_call_video_api()`'s log "model=... → videoModelKey=...").
-        self._log('info', f'Task #{task["id"]} model="{task.get("model") or ""}" '
-                           f'→ imageModelName={image_model} (nguồn: {model_src})')
-        if model_src not in _MODEL_SRC_FROM_DB and (task.get('model') or '').strip():
-            self._log('warn', f'Task #{task["id"]} model="{task.get("model")}" — KHÔNG có trong '
-                               f'veo_models.model_key (backend), dùng {model_src}: '
-                               f'imageModelName={image_model} (có thể KHÔNG đúng model đã chọn)')
-
-        body = flow_api.build_text_to_image_body(
-            project_id, task.get('prompt_text') or task.get('title') or '', captcha,
-            aspect_ratio=task.get('aspect_ratio') or '16:9',
-            model=image_model,
-            image_inputs=image_inputs,
-            session_id=self._tokens.get('sessionId') or '',
-        )
-        url     = flow_api.TEXT_TO_IMAGE.url(project_id)
-        self._log('info', f'POST {flow_api.TEXT_TO_IMAGE.name} project={project_id[:8]}… '
-                           f'({len(image_inputs)} ref ảnh) (direct API)')
-        data = self._post_aisandbox(url, body, timeout=90)
-
-        results = flow_api.parse_image_results(data)
-        if not results:
-            raise RuntimeError(f'API không trả về fifeUrl nào — body: {str(data)[:200]}')
-        self._log('ok', f'{len(results)} image URL(s) từ direct API')
-        return results
+        be_results = self._call_image_api_be(task, captcha)
+        if not be_results:
+            raise RuntimeError(self._be_fail_msg('Tạo ảnh'))
+        return be_results
 
     def _call_video_api(self, task: dict, captcha: str,
                         uploaded_media_names: list | None = None) -> dict:
@@ -3243,90 +2378,14 @@ class SeleniumFlowWorker:
         if not project_id:
             raise RuntimeError('Không tìm được project ID từ project_url (cần dạng /project/{uuid})')
 
-        raw_prompt   = task.get('prompt_text') or task.get('title') or ''
-        prompt       = f'TASK_{task["id"]}:{raw_prompt}'
-        aspect_ratio = task.get('aspect_ratio') or '16:9'
         names = (list(uploaded_media_names)
                  if uploaded_media_names is not None
                  else self._prepare_video_uploads(task))
 
-        if self._be_generate_enabled():
-            be_info = self._call_video_api_be(task, captcha, names)
-            if not be_info:
-                raise RuntimeError(self._be_fail_msg(f'Tạo video (mode={mode})'))
-            return be_info
-
-        # ══ ĐƯỜNG CŨ aisandbox — ĐÃ CẤT, chỉ chạy khi setting
-        # `generate_via_batchexecute` = 0. Giữ lại nguyên vẹn để lấy lại khi
-        # cần, KHÔNG chạy song song với batchexecute (yêu cầu user 2026-09-04).
-        if mode in ('imageToVideo', 'componentsToVideo'):
-            if not names:
-                raise RuntimeError(f'mode={mode} cần ít nhất 1 ảnh tham chiếu đã upload')
-            # (2026-08-13, fix bug thật — project_6, 855 task `imageToVideo`,
-            # model="Veo 3.1 - Lite [Lower Priority]") — TRƯỚC ĐÂY nhánh này
-            # KHÔNG resolve gì cả, luôn dùng default cứng `veo_3_1_r2v_lite`,
-            # bỏ qua HOÀN TOÀN task.model — namespace ingredient (`veo_3_1_r2v_*`)
-            # có biến thể theo tier riêng, GIỐNG namespace textToVideo, KHÔNG
-            # bị Flow UI khoá cứng như suy luận ban đầu (user xác nhận trực
-            # tiếp: "Lite [Lower Priority]" → `veo_3_1_r2v_lite_low_priority`,
-            # KHÁC `veo_3_1_r2v_lite` plain). Giờ resolve qua model_catalog —
-            # KHÔNG có cột DB riêng cho ingredient (`model_key_ingredient` đã
-            # bị XOÁ khỏi backend theo đúng yêu cầu user — xem migrations.py
-            # `_ensure_veo_models_key_columns()`), giá trị DERIVE 100% từ
-            # `veo_models.model_key` (t2v) bằng cách thay `t2v`→`r2v` — đây
-            # VẪN LÀ "dùng hoàn toàn trong DB" (`source='db-derived'`), không
-            # phải fallback/mặc định, chỉ cảnh báo khi THẬT SỰ không có trong
-            # DB (`local-fallback`/`local-default`, xem `_MODEL_SRC_FROM_DB`).
-            model_key, model_src = model_catalog.resolve_video_model(task.get('model'), ingredient=True)
-            self._log('info', f'  Task #{task["id"]} model="{task.get("model") or ""}" '
-                               f'→ videoModelKey={model_key} (ingredient, nguồn: {model_src})')
-            if model_src not in _MODEL_SRC_FROM_DB and (task.get('model') or '').strip():
-                self._log('warn', f'Task #{task["id"]} model="{task.get("model")}" — KHÔNG có '
-                                   f'trong veo_models.model_key (backend), dùng '
-                                   f'{model_src}: videoModelKey={model_key} (có thể KHÔNG đúng '
-                                   f'tier đã chọn)')
-            reference_images = [flow_api.build_video_reference_image(n) for n in names]
-            body = flow_api.build_ingredient_to_video_body(
-                project_id, prompt, captcha, reference_images, aspect_ratio=aspect_ratio,
-                video_model_key=model_key,
-                session_id=self._tokens.get('sessionId') or '',
-            )
-            endpoint = flow_api.INGREDIENT_TO_VIDEO
-
-        elif mode == 'frameToVideo':
-            if not names:
-                raise RuntimeError('mode=frameToVideo cần ảnh Bắt đầu đã upload')
-            body = flow_api.build_frame_to_video_body(
-                project_id, prompt, captcha, names[0], aspect_ratio=aspect_ratio,
-                session_id=self._tokens.get('sessionId') or '',
-            )
-            endpoint = flow_api.FRAME_TO_VIDEO
-
-        else:  # textToVideo (mặc định)
-            model_key, model_src = model_catalog.resolve_video_model(task.get('model'), ingredient=False)
-            self._log('info', f'  Task #{task["id"]} model="{task.get("model") or ""}" '
-                               f'→ videoModelKey={model_key} (nguồn: {model_src})')
-            if model_src not in _MODEL_SRC_FROM_DB and (task.get('model') or '').strip():
-                self._log('warn', f'Task #{task["id"]} model="{task.get("model")}" — KHÔNG có '
-                                   f'trong veo_models.model_key (backend), dùng {model_src}: '
-                                   f'videoModelKey={model_key} (có thể KHÔNG đúng tier đã chọn)')
-            body = flow_api.build_text_to_video_body(
-                project_id, prompt, captcha, aspect_ratio=aspect_ratio,
-                video_model_key=model_key,
-                session_id=self._tokens.get('sessionId') or '',
-            )
-            endpoint = flow_api.TEXT_TO_VIDEO
-
-        url = endpoint.url(project_id)
-        self._log('info', f'POST {endpoint.name} mode={mode} → {url}')
-        data = self._post_aisandbox(url, body, timeout=60)
-
-        info = flow_api.parse_video_workflow(data)
-        if not info['workflowId'] and not info['mediaId']:
-            raise RuntimeError(f'Submit không trả về workflow/media nào — body: {str(data)[:300]}')
-        self._log('ok', f'✔ Đã submit {endpoint.name} — workflowId=…{(info["workflowId"] or "")[-40:]} '
-                         f'mediaId={info["mediaId"] or "?"} — không chờ tile, sang prompt tiếp')
-        return info
+        be_info = self._call_video_api_be(task, captcha, names)
+        if not be_info:
+            raise RuntimeError(self._be_fail_msg(f'Tạo video (mode={mode})'))
+        return be_info
 
     # ══════════════════════════════════════════════════════════════════════════
     # DOM mode helpers — port từ FlowMediaGenerator.js (dùng CDP qua Selenium)
@@ -3406,11 +2465,28 @@ class SeleniumFlowWorker:
         số component React tra pointer-position/hover-state trước khi chấp nhận click)
         VÀ thiếu field 'buttons' (bitmask nút đang giữ — 1 lúc pressed, 0 lúc released,
         Chromium có thể xử lý sự kiện không đầy đủ nếu thiếu field này) — nghi là
-        nguyên nhân picker mở không ổn định ('picker không mở sau 10s')."""
-        r = self.driver.execute_script(
-            "var r=arguments[0].getBoundingClientRect();"
-            "return {x:Math.round(r.left+r.width/2),y:Math.round(r.top+r.height/2)};", el)
-        x, y = int(r['x']), int(r['y'])
+        nguyên nhân picker mở không ổn định ('picker không mở sau 10s').
+
+        (2026-09-24) Chờ phần tử ĐỨNG YÊN trước khi bấm: menu/popover của Flow
+        (Angular Material) mở bằng hiệu ứng trượt/phóng to — đo trên profile 25,
+        mục menu model ở ~0.1s đầu nằm sai chỗ ([20,136] rồi mới về [619,388]).
+        Bấm ngay lúc tìm thấy → trúng chỗ khác, model không đổi (chọn model
+        chập chờn). Đọc toạ độ 2 lần liên tiếp cách 80ms tới khi trùng (tối đa ~1.5s)."""
+        rect_js = ("var r=arguments[0].getBoundingClientRect();"
+                   "return [Math.round(r.left),Math.round(r.top),Math.round(r.width),Math.round(r.height)];")
+        prev = self.driver.execute_script(rect_js, el)
+        for _ in range(18):
+            time.sleep(0.08)
+            cur = self.driver.execute_script(rect_js, el)
+            if cur == prev:
+                break
+            prev = cur
+        left, top, width, height = prev
+        if getattr(self, '_cloak_human', None):
+            # CloakBrowser humanize: chuột đi đường cong Bezier tới điểm ngẫu nhiên trong phần tử
+            self._cloak_human.click_box(left, top, width, height)
+            return
+        x, y = int(left + width / 2), int(top + height / 2)
         self._cdp('Input.dispatchMouseEvent',
                   {'type': 'mouseMoved', 'x': x, 'y': y, 'button': 'none', 'modifiers': 0})
         self._cdp('Input.dispatchMouseEvent',
@@ -3857,15 +2933,6 @@ class SeleniumFlowWorker:
         reason = getattr(exc, 'reason', '') or str(exc)
         return any(r in reason for r in self._MODEL_RETRY_REASONS)
 
-    def _be_generate_enabled(self) -> bool:
-        """Công tắc `generate_via_batchexecute` (Cài đặt cục bộ).
-
-        ⚠️ (2026-09-04, theo yêu cầu user "cất luôn source aisandbox khi nào
-        cần lấy lại chứ ko chạy 2 loại") — KHÔNG còn backoff tự động sang
-        aisandbox. Bật (mặc định) = CHỈ chạy batchexecute, hỏng thì task lỗi
-        rồi thử lại sau; muốn dùng lại aisandbox thì đặt setting = 0."""
-        return bool(int(self._server_settings.get('generate_via_batchexecute', 1) or 0))
-
     def _be_note_fail(self, what: str, err) -> None:
         """Ghi lý do hỏng (KHÔNG còn chuyển đường) — `_be_last_error` được đưa
         vào message lỗi của task để nhìn log task là biết ngay nguyên nhân."""
@@ -3882,9 +2949,7 @@ class SeleniumFlowWorker:
 
     def _be_fail_msg(self, what: str) -> str:
         last = getattr(self, '_be_last_error', '') or 'xem log phía trên'
-        return (f'{what} qua batchexecute thất bại: {last} '
-                f'(đường aisandbox đã tắt — đặt setting `generate_via_batchexecute`=0 '
-                f'ở trang Cài đặt nếu cần dùng lại)')
+        return f'{what} qua batchexecute thất bại: {last}'
 
     def _be_note_ok(self) -> None:
         self._be_last_error = ''
@@ -3943,9 +3008,7 @@ class SeleniumFlowWorker:
     def _upload_media_to_flow_be(self, image_bytes: bytes, filename: str,
                                  mime_type: str) -> str:
         """Upload 1 ảnh qua RPC `maseQ`. Trả DETAIL_UUID, hoặc '' nếu không đi
-        được (caller tự fallback aisandbox)."""
-        if not self._be_generate_enabled():
-            return ''
+        được."""
         try:
             project_id = self._extract_project_id()
             if not project_id:
@@ -3994,9 +3057,7 @@ class SeleniumFlowWorker:
         `imageInputs`). Trả list [{type,url,name}], hoặc [] nếu không đi được.
 
         `captcha` truyền vào KHÔNG dùng lại được: caller mint nó cho đường
-        aisandbox, nhưng token reCAPTCHA gắn với 1 lần dùng — mint riêng ở đây."""
-        if not self._be_generate_enabled():
-            return []
+        riêng, nhưng token reCAPTCHA gắn với 1 lần dùng — mint riêng ở đây."""
         project_id = self._extract_project_id()
         if not project_id:
             self._log('warn', 'batchexecute ảnh: bỏ qua — profile chưa có '
@@ -4063,8 +3124,6 @@ class SeleniumFlowWorker:
 
         `frameToVideo` CHƯA hỗ trợ (rpcid `eb1hJf` mới biết tên từ bundle,
         chưa capture shape) — trả None để đi aisandbox."""
-        if not self._be_generate_enabled():
-            return None
         mode = task.get('mode', 'textToVideo')
         if mode == 'frameToVideo':
             # rpcid `eb1hJf` mới biết tên từ bundle, CHƯA capture shape body
@@ -4552,18 +3611,25 @@ class SeleniumFlowWorker:
             "var r=arguments[0].getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2};",
             ce)
         x, y = int(r['x']), int(r['y'])
-        for etype in ('mousePressed', 'mouseReleased'):
-            self._cdp('Input.dispatchMouseEvent', {
-                'type': etype, 'x': x, 'y': y, 'button': 'left', 'clickCount': 1,
-            })
+        human = getattr(self, '_cloak_human', None)
+        if human:
+            self._cdp_click_el(ce)
+        else:
+            for etype in ('mousePressed', 'mouseReleased'):
+                self._cdp('Input.dispatchMouseEvent', {
+                    'type': etype, 'x': x, 'y': y, 'button': 'left', 'clickCount': 1,
+                })
         self._sleep(0.3)
 
         # Type prompt: char-by-char cho 20 ký tự đầu → mô phỏng typing
         head = prompt[:20]
         rest = prompt[20:]
-        for ch in head:
-            self._cdp('Input.insertText', {'text': ch})
-            self._sleep(0.07 + random.random() * 0.10)
+        if human:
+            human.type_text(head)   # nhịp gõ + gõ sai rồi xoá của cloakbrowser.human
+        else:
+            for ch in head:
+                self._cdp('Input.insertText', {'text': ch})
+                self._sleep(0.07 + random.random() * 0.10)
         if rest:
             self._sleep(0.1)
             self._cdp('Input.insertText', {'text': rest})
@@ -4582,14 +3648,25 @@ class SeleniumFlowWorker:
         # docstring). Chờ nút hết disabled tối đa 10s trước khi bấm.
         submit_btn = None
         for _ in range(40):
-            submit_btn = self._js("""
-                var b = document.querySelector('button[aria-label="Start generation"]');
-                return (b && !b.disabled) ? b : null;
-            """)
+            submit_btn = self._js(
+                'var b=' + _flow_btn_expr('flowStartGeneration', _FB_SUBMIT) + ';'
+                'return (b && !b.disabled) ? b : null;')
             if submit_btn:
                 break
             self._sleep(0.25)
         if not submit_btn:
+            credit_warn = self._js("""
+                var keys = arguments[0].map(function(k){ return k.toLowerCase(); });
+                var box = document.querySelector('flow-prompt-box') || document;
+                var b = [...box.querySelectorAll('button')].find(function(e){
+                    var a = (e.getAttribute('aria-label') || '').toLowerCase();
+                    return keys.some(function(k){ return a.includes(k); });
+                });
+                return b ? b.getAttribute('aria-label') : null;
+            """, get_i18n_texts().get('flowCreditWarning') or ['credit'])
+            if credit_warn:
+                raise RuntimeError(f'DOM: tài khoản KHÔNG ĐỦ CREDIT — nút "Bắt đầu tạo" bị khoá '
+                                   f'(Flow hiện "{credit_warn}")')
             raise RuntimeError('DOM: nút "Start generation" không sẵn sàng (vẫn disabled) sau 10s')
         self._cdp_click_el(submit_btn)
         self._log('info', f'DOM prompt submitted ({len(prompt)} chars)')
@@ -4628,9 +3705,8 @@ class SeleniumFlowWorker:
             output_count = int(task.get('output_count') or 1)
             model        = (task.get('model') or '').strip()
 
-            config_btn = self._wait_js(
-                'return document.querySelector(\'button[aria-label="Settings trigger"]\') || null;',
-                timeout=4.0)
+            config_btn = self._wait_js(_flow_btn_js('flowSettingsTrigger', _FB_SETTINGS),
+                                       timeout=4.0)
             if not config_btn:
                 self._log('warn', 'DOM: config button not found — skip settings')
                 return
@@ -4659,28 +3735,43 @@ class SeleniumFlowWorker:
                 return True
 
             # ── Mode (Image / Video) ────────────────────────────────────
-            mode_variant = 'Video' if mode in (
-                'textToVideo', 'imageToVideo', 'frameToVideo', 'componentsToVideo'
-            ) else 'Image'
-            select_toggle('Mode', [mode_variant])
+            # (2026-09-24) Mode chọn theo ICON (image/videocam) — chữ trên nút
+            # đổi theo ngôn ngữ tài khoản ("Image"/"Hình ảnh").
+            is_video_mode = mode in (
+                'textToVideo', 'imageToVideo', 'frameToVideo', 'componentsToVideo')
+            i18n = get_i18n_texts()
+            select_toggle(i18n.get('flowToggleMode'),
+                          ['icon:videocam', 'icon:play_circle'] if is_video_mode else ['icon:image'])
 
             # ── Video type (Frames / Ingredients) ───────────────────────
-            video_type_variant = {
-                'imageToVideo':      'Ingredients',
-                'componentsToVideo': 'Ingredients',
-                'frameToVideo':      'Frames',
+            video_type_key = {
+                'imageToVideo':      'flowVideoTypeIngredients',
+                'componentsToVideo': 'flowVideoTypeIngredients',
+                'frameToVideo':      'flowVideoTypeFrames',
             }.get(mode)
-            if video_type_variant:
-                select_toggle('Video type', [video_type_variant])
+            if video_type_key:
+                if not select_toggle(i18n.get('flowToggleVideoType'), i18n.get(video_type_key)):
+                    self._log('warn', f'DOM: không tìm thấy lựa chọn loại video cho mode={mode}')
 
             # ── Aspect ratio ─────────────────────────────────────────────
             if aspect_ratio:
-                if not select_toggle('Aspect ratio', [aspect_ratio]):
+                if not select_toggle(i18n.get('flowToggleAspectRatio'), [aspect_ratio]):
                     self._log('warn', f'DOM: ratio button "{aspect_ratio}" not found')
+
+            # ── Thời lượng video (2026-09-24 — nhóm "Thời lượng video" mới) ──
+            if is_video_mode:
+                try:
+                    dur = int(float(task.get('video_duration') or 0))
+                except (TypeError, ValueError):
+                    dur = 0
+                if dur:
+                    if not select_toggle(i18n.get('flowToggleDuration'),
+                                         [f'{dur} giây', f'{dur}s', f'{dur} sec', f'{dur} seconds']):
+                        self._log('warn', f'DOM: không có lựa chọn thời lượng {dur}s — giữ mặc định')
 
             # ── Output count ─────────────────────────────────────────────
             count_variants = {1: ['x1'], 2: ['x2'], 3: ['x3'], 4: ['x4']}.get(output_count, ['x1'])
-            select_toggle('Output count', count_variants)
+            select_toggle(i18n.get('flowToggleOutputCount'), count_variants)
 
             # ── Model dropdown ────────────────────────────────────────────
             # (2026-08-07) RETRY + XÁC NHẬN THẬT SỰ ĐÃ ÁP DỤNG — xem
@@ -4704,8 +3795,7 @@ class SeleniumFlowWorker:
             # khi raise để không để lại popup mở dở cho bước kế tiếp.
             try:
                 if self._dom_is_config_open():
-                    btn = self._js(
-                        'return document.querySelector(\'button[aria-label="Settings trigger"]\');')
+                    btn = self._js(_flow_btn_js('flowSettingsTrigger', _FB_SETTINGS))
                     if btn:
                         self._cdp_click_el(btn)
             except Exception:
@@ -4750,10 +3840,10 @@ class SeleniumFlowWorker:
         `_ensure_settings_open()` — kiểm tra + tự mở lại panel TRƯỚC khi tìm
         `drop_btn` (đầu mỗi attempt) VÀ TRƯỚC khi đọc verify (sau khi click
         item, nếu panel đã đóng thì mở lại rồi mới đọc)."""
-        settings_trigger_js = 'return document.querySelector(\'button[aria-label="Settings trigger"]\') || null;'
-        find_drop_btn_js = 'return document.querySelector(\'button[aria-label="Select model family"]\') || null;'
+        settings_trigger_js = _flow_btn_js('flowSettingsTrigger', _FB_SETTINGS)
+        find_drop_btn_js = _flow_btn_js('flowSelectModel', _FB_MODEL)
         read_label_js = """
-            var btn = document.querySelector('button[aria-label="Select model family"]');
+            var btn = """ + _flow_btn_expr('flowSelectModel', _FB_MODEL) + """;
             if (!btn) return null;
             var span = btn.querySelector('.model-select-trigger-content');
             if (!span) return null;
@@ -4829,7 +3919,10 @@ class SeleniumFlowWorker:
                 var wanted = arguments[0];
                 var label = (function(){ %s })();
                 if (!label) return false;
-                return label.trim() === wanted;
+                // (2026-09-24) Nhãn trigger có tiền tố emoji ("🍌 Nano Banana 2") —
+                // bỏ ký tự không phải chữ/số ở đầu cả 2 vế trước khi so.
+                var norm = function(x){ return x.trim().replace(/^[^A-Za-z0-9]+/, '').trim(); };
+                return norm(label) === norm(wanted);
             """ % read_label_js, (model,), timeout=3.0, interval=0.15)
 
             if applied:
@@ -4963,6 +4056,10 @@ class SeleniumFlowWorker:
         # `<flow-image-ingredient-chip>` CHỈ xuất hiện trong thanh ingredient
         # của composer, không dùng lẫn ở nơi khác.
         def _count_attached_refs():
+            # Cả "Thành phần" lẫn ô "Bắt đầu/Kết thúc" của "Khung hình" đều hiện
+            # ảnh đã đính bằng chip này (verify trên profile 25, 2026-09-24).
+            # ĐỪNG đếm mọi <img> trong ô prompt — tài khoản hết credit có thêm
+            # `img.prompt-warning-sphere-image` sẽ làm lệch số ảnh mong đợi.
             return self._js(
                 "return document.querySelectorAll('flow-image-ingredient-chip img.chip-image').length;"
             ) or 0
@@ -5016,19 +4113,33 @@ class SeleniumFlowWorker:
                 self._log('warn', 'DOM upload: no files fetched — skip upload step')
                 return
 
-            def _open_add_menu() -> bool:
+            def _open_add_menu(idx: int = 0) -> bool:
                 """B1: mở popover "Add ingredients" — nếu 1 attempt trước để
                 nó mở dở (chưa đóng đúng cách), click lại nút trigger để đóng
                 (toggle) trước khi mở lại từ đầu, tránh state lẫn lộn."""
                 if self._js("return !!document.querySelector('flow-add-menu-popover-content');"):
-                    stale_btn = self._js(
-                        'return document.querySelector(\'button[aria-label="Add ingredients to the prompt box"]\');')
+                    stale_btn = self._js(_flow_btn_js('flowAddIngredients', _FB_ADD_REF))
                     if stale_btn:
                         self._cdp_click_el(stale_btn)
                         self._sleep(0.5)
-                add_btn = self._wait_js(
-                    'return document.querySelector(\'button[aria-label="Add ingredients to the prompt box"]\') || null;',
-                    timeout=4.0)
+                if mode == 'frameToVideo':
+                    # (2026-09-24) Chế độ "Khung hình" KHÔNG có nút đính thành
+                    # phần — có 2 ô "Bắt đầu"/"Kết thúc" (`button.empty-chip`),
+                    # bấm vào mở CÙNG popup chọn ảnh ("Chọn một hình ảnh khung").
+                    i18n = get_i18n_texts()
+                    names = i18n.get('flowFrameStart' if idx == 0 else 'flowFrameEnd') or []
+                    add_btn = self._wait_js("""
+                        var names = arguments[0], idx = arguments[1];
+                        var box = document.querySelector('flow-prompt-box');
+                        if (!box) return null;
+                        var btns = [...box.querySelectorAll('button')];
+                        return btns.find(function(b){
+                            return names.indexOf((b.textContent||'').trim()) >= 0;
+                        }) || box.querySelectorAll('button.empty-chip')[0] || null;
+                    """, (names, idx), timeout=4.0)
+                else:
+                    add_btn = self._wait_js(_flow_btn_js('flowAddIngredients', _FB_ADD_REF),
+                                            timeout=4.0)
                 if not add_btn:
                     return False
                 self._cdp_click_el(add_btn)
@@ -5036,6 +4147,30 @@ class SeleniumFlowWorker:
                     'return document.querySelector(\'flow-add-menu-popover-content\') || null;',
                     timeout=4.0)
                 return bool(popover)
+
+            def _press_add_to_prompt(idx: int, expected_count: int):
+                """B5: bấm "Add to prompt"/"Thêm vào câu lệnh" nếu prompt CHƯA đủ
+                ảnh (click item đôi khi tự đính + đóng popover, lúc đó bỏ qua).
+                Không thấy nút cũng không raise — bước validate quyết định."""
+                if _count_attached_refs() >= expected_count:
+                    return
+                add_btn = self._wait_js("""
+                    var names = arguments[0].map(function(n){ return n.toLowerCase(); });
+                    var c = document.querySelector('.cdk-overlay-container');
+                    if (!c) return null;
+                    return [...c.querySelectorAll('button')].find(function(b){
+                        return names.indexOf((b.textContent||'').trim().toLowerCase()) >= 0;
+                    }) || null;
+                """, (get_i18n_texts().get('flowAddToPrompt') or ['Add to prompt'],), timeout=4.0)
+                if add_btn:
+                    # Chờ 1s cho Angular gắn xong handler trước khi bấm.
+                    self._sleep(1)
+                    self._cdp_click_el(add_btn)
+                    self._sleep(1)
+                else:
+                    self._log('info', f'DOM upload: không thấy nút "Add to prompt" '
+                                       f'(img {idx+1}) — click item có thể đã tự đính kèm, '
+                                       'để bước validate quyết định')
 
             def _attach_one_reference(img: dict, idx: int, expected_count: int) -> bool:
                 """B1-B5 cho ĐÚNG 1 ảnh qua popover "Add ingredients" mới. Trả
@@ -5050,15 +4185,21 @@ class SeleniumFlowWorker:
                 if _count_attached_refs() >= expected_count:
                     return True
 
-                if not _open_add_menu():
+                if not _open_add_menu(idx):
                     raise RuntimeError(
                         f'[{mode}] "Add ingredients" popover không mở được (img {idx+1})')
 
                 # ── B2: Click tab "Images" trong side-nav ────────────────
                 img_tab = self._wait_js("""
-                    return [...document.querySelectorAll('mat-list-item[role="tab"]')]
-                        .find(function(el){ return el.textContent.includes('Images'); }) || null;
-                """, timeout=4.0)
+                    var names = arguments[0];
+                    var tabs = [...document.querySelectorAll('mat-list-item[role="tab"]')];
+                    return tabs.find(function(el){
+                        var i = el.querySelector('mat-icon');
+                        return i && i.textContent.trim() === 'image';
+                    }) || tabs.find(function(el){
+                        return names.some(function(n){ return el.textContent.includes(n); });
+                    }) || null;
+                """, (get_i18n_texts().get('imageTab') or ['Images'],), timeout=4.0)
                 if not img_tab:
                     raise RuntimeError(f'[{mode}] "Images" tab not found trong Add menu (img {idx+1})')
                 self._cdp_click_el(img_tab)
@@ -5066,10 +4207,15 @@ class SeleniumFlowWorker:
 
                 # ── B3: Search tên file ──────────────────────────────────
                 search_name = re.sub(r'\.[^.]+$', '', img['name'])  # bỏ extension
-                search_input = self._wait_js(
-                    'var c=document.querySelector(".cdk-overlay-container"); '
-                    'return c ? c.querySelector(\'input[placeholder="Search assets"]\') : null;',
-                    timeout=3.0)
+                search_input = self._wait_js("""
+                    var ph = arguments[0];
+                    var c = document.querySelector('.cdk-overlay-container');
+                    if (!c) return null;
+                    return [...c.querySelectorAll('input')].find(function(i){
+                        return ph.indexOf(i.getAttribute('placeholder') || '') >= 0;
+                    }) || c.querySelector('flow-add-menu-popover-content input[type="text"], '
+                                        + 'flow-add-menu-popover-content input:not([type])') || null;
+                """, (get_i18n_texts().get('searchPlaceholder') or ['Search assets'],), timeout=3.0)
                 if search_input and search_name:
                     # CDP click để focus
                     rc = self.driver.execute_script(
@@ -5109,6 +4255,11 @@ class SeleniumFlowWorker:
                     self._log('info', f'DOM upload: Case 1 — "{img["name"]}" đã có sẵn, click để đính kèm')
                     self._cdp_click_el(gallery_item)
                     self._sleep(1.5)
+                    # (2026-09-24, verify trên profile 25) Ở chế độ Video, click chỉ
+                    # CHỌN ảnh — popover vẫn mở, phải bấm "Thêm vào câu lệnh" mới
+                    # đính. Không bấm thì lần thử lại (đóng popover cũ) đính luôn
+                    # ảnh đã chọn → TRÙNG ảnh. Đủ chip rồi thì hàm tự bỏ qua.
+                    _press_add_to_prompt(idx, expected_count)
                 else:
                     # Case 2 — ảnh CHƯA từng upload (trường hợp PHỔ BIẾN NHẤT
                     # trong thực tế) → click "Upload media" để lộ
@@ -5117,20 +4268,61 @@ class SeleniumFlowWorker:
                     self._log('info', f'DOM upload: Case 2 — upload mới "{img["name"]}" qua DataTransfer')
 
                     upload_btn = self._wait_js("""
+                        var names = arguments[0];
                         var c = document.querySelector('.cdk-overlay-container');
                         if (!c) return null;
-                        return [...c.querySelectorAll('button')].find(function(b){
-                            return (b.getAttribute('mattooltip')||'').includes('Upload media') ||
-                                   (b.textContent||'').includes('Upload media');
+                        var btns = [...c.querySelectorAll('button')];
+                        return btns.find(function(b){
+                            var i = b.querySelector('mat-icon');
+                            return i && i.textContent.trim() === 'upload';
+                        }) || btns.find(function(b){
+                            var tip = b.getAttribute('mattooltip') || '', t = b.textContent || '';
+                            return names.some(function(n){ return tip.includes(n) || t.includes(n); });
                         }) || null;
-                    """, timeout=3.0)
+                    """, (get_i18n_texts().get('flowUploadMedia') or ['Upload media'],), timeout=3.0)
                     if not upload_btn:
                         raise RuntimeError(f'[{mode}] "Upload media" button not found (img {idx+1})')
-                    self._cdp_click_el(upload_btn)
-                    self._sleep(0.5)
-
-                    file_input = self._wait_js(
-                        'return document.querySelector(\'input[type="file"]\') || null;', timeout=5.0)
+                    # (2026-09-24) Flow giờ tạo `input[type=file]` TẠM (không gắn
+                    # vào DOM) rồi gọi `.click()` mở hộp thoại hệ điều hành — tìm
+                    # bằng `querySelector` không thấy. Móc `click()`/`showPicker()`
+                    # của input file để GIỮ LẠI đúng ô đó (và không mở hộp thoại),
+                    # kèm chặn hộp thoại qua CDP phòng khi móc không kịp.
+                    self._js("""
+                        if (!window.__fcHooked) {
+                            window.__fcHooked = true;
+                            var P = HTMLInputElement.prototype;
+                            ['click', 'showPicker'].forEach(function(fn){
+                                var orig = P[fn];
+                                if (!orig) return;
+                                P[fn] = function(){
+                                    if (this.type === 'file' && window.__fcCapture) {
+                                        window.__fcLast = this;
+                                        window.__fcCapture = false;
+                                        return;
+                                    }
+                                    return orig.apply(this, arguments);
+                                };
+                            });
+                        }
+                        window.__fcLast = null;
+                        window.__fcCapture = true;
+                    """)
+                    try:
+                        self._cdp('Page.setInterceptFileChooserDialog', {'enabled': True})
+                    except Exception:
+                        pass
+                    try:
+                        self._cdp_click_el(upload_btn)
+                        self._sleep(0.5)
+                        file_input = self._wait_js(
+                            'return window.__fcLast || document.querySelector(\'input[type="file"]\') || null;',
+                            timeout=5.0)
+                    finally:
+                        self._js('window.__fcCapture = false;')
+                        try:
+                            self._cdp('Page.setInterceptFileChooserDialog', {'enabled': False})
+                        except Exception:
+                            pass
                     if not file_input:
                         raise RuntimeError(f'[{mode}] file input not found (img {idx+1})')
 
@@ -5144,15 +4336,15 @@ class SeleniumFlowWorker:
                     uploaded_item = None
                     for _ in range(160):
                         uploaded_item = self._js("""
-                            var name = arguments[0];
+                            var name = arguments[0], busy = arguments[1];
                             var c = document.querySelector('.cdk-overlay-container');
                             if (!c) return null;
                             var items = [...c.querySelectorAll('button.asset-item[role="option"]')];
                             return items.find(function(b){
                                 var t = b.textContent || '';
-                                return !t.includes('Uploading') && t.includes(name);
+                                return !busy.some(function(w){ return t.includes(w); }) && t.includes(name);
                             }) || null;
-                        """, search_name)
+                        """, search_name, get_i18n_texts().get('flowUploading') or ['Uploading'])
                         if uploaded_item:
                             break
                         self._sleep(0.25)
@@ -5182,24 +4374,7 @@ class SeleniumFlowWorker:
                     # khi CHƯA đủ mới tìm nút, và không thấy nút cũng KHÔNG
                     # raise nữa (để bước validate phía dưới phán quyết, nó vốn
                     # đã poll 20s và trả True/False cho vòng retry).
-                    if _count_attached_refs() < expected_count:
-                        add_btn = self._wait_js("""
-                            var c = document.querySelector('.cdk-overlay-container');
-                            if (!c) return null;
-                            return [...c.querySelectorAll('button')].find(function(b){
-                                return (b.textContent||'').trim() === 'Add to prompt';
-                            }) || null;
-                        """, timeout=4.0)
-                        if add_btn:
-                            # Chờ thêm 1s cho Angular gắn xong handler xử lý ảnh
-                            # vừa upload trước khi click.
-                            self._sleep(1)
-                            self._cdp_click_el(add_btn)
-                            self._sleep(1)
-                        else:
-                            self._log('info', f'DOM upload: không thấy nút "Add to prompt" '
-                                               f'(img {idx+1}) — click item có thể đã tự đính kèm, '
-                                               'để bước validate quyết định')
+                    _press_add_to_prompt(idx, expected_count)
 
                 # ── Validate: prompt có THẬT SỰ hiện đủ ảnh đính kèm chưa ──
                 # (lịch sử, xem CLAUDE.md §5.3) — poll cho DOM kịp cập nhật,
@@ -8349,6 +7524,19 @@ class SeleniumFlowWorker:
             # KHÔNG bật cờ → giữ nguyên hành vi cũ (chỉ xoá cache, không đụng
             # cookie, không ép login) — 2 đường hoàn toàn tách biệt.
             wipe_all = self._sleep_wipe_all_cookies
+            if getattr(self, '_sleep_skip_clean', False):
+                self._sleep_skip_clean = False
+                self._log('info', '[auto-refresh] Profile ngủ do bậc thang batch — KHÔNG xoá '
+                                   'cookie/cache (tuỳ chọn "xoá cookie/cache khi ngủ" đang tắt).')
+                return True
+            # CloakBrowser dùng thư mục profile riêng (<profile_dir>_cloak) → dọn đúng thư mục đó
+            clean_dir = None
+            try:
+                from .cloak_browser import cloak_enabled, cloak_profile_dir
+                if cloak_enabled():
+                    clean_dir = cloak_profile_dir(self.profile)
+            except Exception:
+                pass
             if wipe_all:
                 self._log('warn', '[auto-refresh] Profile ngủ do BẬC THANG BATCH — xoá TẤT CẢ '
                                    'cookie + cache (chấp nhận mất đăng nhập, sẽ tự đăng nhập '
@@ -8359,7 +7547,7 @@ class SeleniumFlowWorker:
                                    'cho cơ chế xoá cookie hiện tại) trước khi thử lại...')
             try:
                 if wipe_all:
-                    result = pm.clear_cache_and_all_cookies(self.profile_id)
+                    result = pm.clear_cache_and_all_cookies(self.profile_id, profile_dir=clean_dir)
                     # Vừa xoá sạch cookie ⇒ CHẮC CHẮN đã đăng xuất Google. Ép
                     # worker KẾ TIẾP của profile này chạy `_ensure_google_login()`
                     # đầy đủ bất kể `google_login_check_enabled` đang tắt — nếu
@@ -8375,7 +7563,7 @@ class SeleniumFlowWorker:
                                      'Lần chạy sau sẽ tự check/đăng nhập lại Google.')
                     self._sleep_wipe_all_cookies = False
                 else:
-                    result = pm.clear_cache_only(self.profile_id)
+                    result = pm.clear_cache_only(self.profile_id, profile_dir=clean_dir)
                     self._log('ok', f'[auto-refresh] ✔ Đã xoá cache ({len(result.get("removed", []))} mục).')
                 # (2026-08-17) TRƯỚC ĐÂY `errors` (populate bởi
                 # `_clear_chrome_cache_only()`/`_purge_non_login_cookies()` khi
@@ -8631,15 +7819,14 @@ class SeleniumFlowWorker:
           • **Batch THÀNH CÔNG** (`_batch_success_count > 0` — ĐỦ 1 task thành công
             là tính, dù N-1 task còn lại lỗi hết): reset bộ đếm về 0, KHÔNG dọn
             cookie, KHÔNG click Create — chỉ refresh + reconcile như bình thường.
-          • **Chạm `batch_fail_count_before_cleanup`** (mặc định 2 batch lỗi liên
-            tiếp): xoá cookie labs.google + cache (GIỮ cookie đăng nhập Google ở
-            domain khác) → refresh → click "Create with Google Flow" → refresh →
-            reconcile. KHÔNG reset bộ đếm — batch kế tiếp vẫn lỗi thì đi tiếp lên
-            bậc ngủ, đúng ý "nhưng vẫn lỗi tiếp tục batch kế tiếp đó".
+          • ~~Chạm `batch_fail_count_before_cleanup` → dọn cookie + click Create~~
+            (2026-09-24) ĐÃ BỎ theo yêu cầu user — batch lỗi chưa tới ngưỡng ngủ
+            chỉ refresh + reconcile như batch thường.
           • **Chạm `batch_fail_count_before_sleep`** (mặc định 3): cho profile ngủ
-            `error_sleep_secs` + bật cờ `_sleep_wipe_all_cookies` để
-            `_clear_profile_if_sleeping()` (chạy sau `driver.quit()`) xoá TẤT CẢ
-            cookie + cache rồi ép check đăng nhập ở lần chạy kế tiếp.
+            `error_sleep_secs`. Tuỳ chọn `batch_sleep_wipe_cookies` (mặc định bật):
+            bật cờ `_sleep_wipe_all_cookies` để `_clear_profile_if_sleeping()` (chạy
+            sau `driver.quit()`) xoá TẤT CẢ cookie + cache rồi ép check đăng nhập
+            ở lần chạy kế tiếp; tắt → chỉ ngủ, không xoá gì (`_sleep_skip_clean`).
 
         ⚠️ (2026-08-20, ĐỔI HÀNH VI CŨ theo yêu cầu user "theo phương án 1: nhưng
         không click create vì chỉ khi xóa cookie mới cần click") — TRƯỚC ĐÂY
@@ -8657,6 +7844,7 @@ class SeleniumFlowWorker:
         # `threshold_clean` bên dưới — `_cdp_clear_cache_and_cookies()` tự tra
         # domain theo `worker_mode`, không gated bởi `is_flow`. Vẫn đếm batch
         # lỗi + ngủ như thường (bậc thang này không phụ thuộc Flow).
+        # (2026-09-24) Nấc `threshold_clean` nhắc ở trên ĐÃ BỎ.
         is_flow = self.worker_mode in ('dom', 'api')
 
         if self._batch_success_count > 0:
@@ -8672,15 +7860,20 @@ class SeleniumFlowWorker:
         self._consecutive_failed_batches += 1
         n = self._consecutive_failed_batches
         threshold_sleep = int(self._server_settings.get('batch_fail_count_before_sleep', 3) or 3)
-        threshold_clean = int(self._server_settings.get('batch_fail_count_before_cleanup', 2) or 2)
 
         if n >= threshold_sleep:
             sleep_secs = int(self._server_settings.get('error_sleep_secs', 300))
+            # (2026-09-24) Tuỳ chọn `batch_sleep_wipe_cookies`: bật = ngủ + xoá
+            # TẤT CẢ cookie/cache + ép check đăng nhập (hành vi cũ); tắt = chỉ
+            # ngủ, KHÔNG đụng cookie/cache gì cả.
+            wipe = bool(int(self._server_settings.get('batch_sleep_wipe_cookies', 1) or 0))
             self._log('error', f'[batch-escalation] {n} batch lỗi liên tiếp (không task nào '
-                                f'thành công) — cho profile "ngủ" {sleep_secs}s + xoá TẤT CẢ '
-                                'cookie/cache, ép check đăng nhập Google lần chạy sau.')
+                                f'thành công) — cho profile "ngủ" {sleep_secs}s'
+                                + (' + xoá TẤT CẢ cookie/cache, ép check đăng nhập Google lần chạy sau.'
+                                   if wipe else ' (KHÔNG xoá cookie/cache — tuỳ chọn đang tắt).'))
             self._consecutive_failed_batches = 0
-            self._sleep_wipe_all_cookies = True
+            self._sleep_wipe_all_cookies = wipe
+            self._sleep_skip_clean = not wipe
             pm.set_status(self.profile_id, 'sleeping', clear_task=True, pid=None)
             self._sleep_until = time.time() + sleep_secs
             # Ghi vào dict module-level — thread worker sắp thoát, dispatcher cần
@@ -8689,18 +7882,10 @@ class SeleniumFlowWorker:
             _sleep_until_by_pid[self.profile_id] = self._sleep_until
             return True
 
-        if n >= threshold_clean:
-            target_domain = _batch_clean_target_domain(self.worker_mode) or '(không có domain riêng)'
-            self._log('warn', f'[batch-escalation] {n} batch lỗi liên tiếp — xoá cookie '
-                               f'{target_domain} + cache (giữ đăng nhập Google)'
-                               + (' rồi click lại "Create with Google Flow".' if is_flow else '.'))
-            self._cdp_clear_cache_and_cookies()
-            if is_flow:
-                self._recover_flow_project_page_after_cache_clear(click_create=True)
-            return False
-
+        # (2026-09-24) Bỏ nấc "N batch lỗi → dọn cookie labs.google + click
+        # Create" theo yêu cầu user — batch lỗi chưa tới ngưỡng ngủ chỉ refresh
+        # + reconcile như batch bình thường.
         self._log('warn', f'[batch-escalation] Batch lỗi (không task nào thành công) — '
-                           f'{n}/{threshold_clean} trước khi dọn cookie, '
                            f'{n}/{threshold_sleep} trước khi ngủ.')
         if is_flow:
             self._recover_flow_project_page_after_cache_clear(click_create=False)
@@ -8730,13 +7915,9 @@ class SeleniumFlowWorker:
         try:
             self._req('POST', f'{FLOW_SERVER}/api/media/task/processing',
                       body={'taskId': task_id, 'machineCode': self.machine_code})
-            self._drain_perf_logs()
-            self._ensure_api_ready(timeout=45)
             captcha = self._get_fresh_recaptcha('VIDEO_GENERATION')
             if not captcha:
                 raise RuntimeError('Không lấy được reCAPTCHA VIDEO_GENERATION')
-            if not self.can_generate_via_api():
-                raise RuntimeError('Chưa có API token cho video generation')
             self._call_video_api(task, captcha, uploaded_media_names=uploaded_media_names)
             return True, False
         except Exception as e:
@@ -8751,10 +7932,9 @@ class SeleniumFlowWorker:
     # THREAD Python THẬT, mỗi thread tự bắn 1 request rồi BLOCK CHỜ ĐÚNG
     # response của chính nó, thay vì tuần tự "gửi 1 → chờ xong → gửi 2".
     #
-    # Vì sao khả thi: `_post_aisandbox()` (POST generate thật) đi qua
-    # `curl_cffi` — 1 HTTP client Python THUẦN, HOÀN TOÀN TÁCH RỜI khỏi
-    # Selenium driver (xem docstring `_post_aisandbox()`) — nhiều thread gọi
-    # đồng thời an toàn, không đụng nhau. Chỉ CÓ 1 bước THẬT SỰ cần driver:
+    # (2026-09-24) Ghi chú lịch sử: bản đầu dựa trên đường aisandbox
+    # (curl_cffi, tách khỏi Selenium) — đường đó đã GỠ; giờ generate đi qua
+    # batchexecute (`flow_be.py`). Chỉ CÓ 1 bước THẬT SỰ cần driver:
     # mint reCAPTCHA token (`_get_fresh_recaptcha()`, dùng
     # `execute_async_script`) — 1 Selenium session KHÔNG an toàn nếu nhiều
     # thread cùng gọi lệnh 1 lúc (1 session = 1 command queue), nên bước này
@@ -8806,16 +7986,11 @@ class SeleniumFlowWorker:
             for i, task in enumerate(tasks):
                 if self._stop.is_set():
                     break
-                if not self._be_generate_enabled() and not self.has_api_ready():
-                    try:
-                        self._sync_project_apis(timeout=30)
-                    except Exception:
-                        pass
                 # Kiểm tra điều kiện RẺ trước, mint reCAPTCHA sau — mint là 1 lời
                 # gọi THẬT tới Google; task chắc chắn không đi API thì đừng gọi
                 # (log 09:07 cho thấy mỗi task hỏng vẫn mint 1 token vô ích, vừa
                 # phí vừa dễ bị tính là nhịp bất thường).
-                if not (self.can_generate_via_api() and bool(self._extract_project_id())):
+                if not self._extract_project_id():
                     ui_tasks.append(task)
                     continue
                 captcha = self._get_fresh_recaptcha('IMAGE_GENERATION')
@@ -8879,8 +8054,7 @@ class SeleniumFlowWorker:
             if stop_now:
                 self._report_task_error(task['id'], 'Dừng trước khi generate (profile chuyển sang ngủ)')
                 continue
-            reason = ('không có token/phiên API' if not self.can_generate_via_api()
-                      else 'không có project id' if not self._extract_project_id()
+            reason = ('không có project id' if not self._extract_project_id()
                       else 'không lấy được reCAPTCHA')
             if self._api_task_failed(task, f'Không gọi được API tạo ảnh ({reason})', dom_queue):
                 stop_now = True
@@ -8935,13 +8109,9 @@ class SeleniumFlowWorker:
                     if source_media:
                         self._log('info', f'⬆ Upload reference image TASK #{task_id}…')
                     names = self._prepare_video_uploads(task) if source_media else []
-                    self._drain_perf_logs()
-                    self._ensure_api_ready(timeout=45)
                     # Kiểm tra điều kiện TRƯỚC khi mint reCAPTCHA (mint là 1 lời
                     # gọi THẬT tới Google) — trước đây mint xong mới kiểm tra nên
                     # mỗi task hỏng vẫn đốt 1 token vô ích (log 09:07).
-                    if not self.can_generate_via_api():
-                        raise RuntimeError('Chưa có API token cho video generation')
                     captcha = self._get_fresh_recaptcha('VIDEO_GENERATION')
                     if not captcha:
                         raise RuntimeError('Không lấy được reCAPTCHA VIDEO_GENERATION')
@@ -9004,7 +8174,7 @@ class SeleniumFlowWorker:
         try:
             return bool(self._js(
                 "return !!(document.querySelector('.ProseMirror[contenteditable=\"true\"]')"
-                " || document.querySelector('button[aria-label=\"Settings trigger\"]'));"))
+                " || " + _flow_btn_expr('flowSettingsTrigger', _FB_SETTINGS) + ");"))
         except Exception:
             return False
 
@@ -9077,7 +8247,6 @@ class SeleniumFlowWorker:
 
         attempted_ids: set = set()
         if video_tasks and not stop_now and not self._stop.is_set():
-            self._ensure_api_ready(timeout=45)
             video_pending, stop_now, attempted_ids = self._run_video_tasks_staggered(
                 video_tasks, dom_queue=dom_queue)
             for task in video_tasks:
@@ -9394,15 +8563,8 @@ class SeleniumFlowWorker:
                 # → nhanh hơn, không phụ thuộc DOM; cần: auth headers + recaptchaToken + project_id
                 # (2026-08-12) body tự dựng qua flow_api.py, không còn cần lastRequestBody làm template
                 # Fallback: UI-driven (type prompt + Enter, intercept fetch response)
-                if not self._be_generate_enabled() and not self.has_api_ready():
-                    try:
-                        self._sync_project_apis(timeout=30)
-                    except Exception:
-                        pass
                 captcha = self._get_fresh_recaptcha('IMAGE_GENERATION')
-                can_api = (self.can_generate_via_api()
-                           and bool(captcha)
-                           and bool(self._extract_project_id()))
+                can_api = bool(captcha) and bool(self._extract_project_id())
 
                 if can_api:
                     try:
@@ -9415,9 +8577,7 @@ class SeleniumFlowWorker:
                             return self._run_task_dom(task)
                         raise
                 else:
-                    reason = ('no auth' if not self.can_generate_via_api()
-                              else 'no recaptcha' if not captcha
-                              else 'no project_id')
+                    reason = 'no recaptcha' if not captcha else 'no project_id'
                     if self._api_dom_fallback_enabled():
                         self._log('warn', f'[api→dom] Không gọi được API ({reason}) → chạy DOM')
                         return self._run_task_dom(task)
@@ -9426,7 +8586,7 @@ class SeleniumFlowWorker:
 
                 # (2026-08-14, fix bug thật "task hoàn tất nhưng không thấy
                 # media mới" khi Render lại) — ưu tiên `u['name']` (uuid THẬT,
-                # xem `_call_image_api_v2()`/`_generate_image_via_ui()`); fallback
+                # xem `_call_image_api_v2()`); fallback
                 # tên tự chế CHỈ khi thiếu.
                 media = [{'name': u.get('name') or f'img_{task_id}_{i+1}', 'url': u['url']}
                          for i, u in enumerate(results_urls)]
@@ -9439,13 +8599,9 @@ class SeleniumFlowWorker:
             else:
                 # Video đi qua `_run_tasks_api_batch` (submit liên tiếp, không chờ
                 # tile). Nhánh này chỉ còn nếu `_run_task_api` bị gọi lẻ.
-                self._drain_perf_logs()
-                self._ensure_api_ready(timeout=45)
                 captcha = self._get_fresh_recaptcha('VIDEO_GENERATION')
                 if not captcha:
                     raise RuntimeError('Không lấy được reCAPTCHA VIDEO_GENERATION')
-                if not self.can_generate_via_api():
-                    raise RuntimeError('Chưa có API token cho video generation')
                 self._call_video_api(task, captcha)
                 leftover = self._wait_and_reconcile_tasks(
                     {task_id: task},
@@ -9586,24 +8742,9 @@ class SeleniumFlowWorker:
             else:
                 self._log('info', 'Chrome opened — navigate to Flow page')
                 self._ensure_flow_page()
-                self._trigger_page_requests()
 
-                if self.worker_mode == 'api' and self._be_generate_enabled():
-                    # (2026-09-04) Đường batchexecute KHÔNG cần bearer token /
-                    # fingerprint của aisandbox — bỏ hẳn bước chờ tới 90s ở đây
-                    # (vừa chậm vừa hay thất bại vì app Flow mới không còn gọi
-                    # aisandbox để mà bắt header).
-                    self._log('ok', 'API mode (batchexecute) — sẵn sàng nhận task '
-                                    '(không cần token aisandbox)')
-                elif self.worker_mode == 'api':
-                    self._sync_project_apis(timeout=90)
-                    if self.has_api_ready():
-                        extra = ' + sessionId' if self.has_session_id() else ' (sessionId fallback)'
-                        self._log('ok', f'Tokens ready (auth+fingerprint{extra}) — bắt đầu nhận task')
-                    elif self.has_tokens():
-                        self._log('warn', 'Có auth nhưng thiếu fingerprint — sẽ sync lại lúc POST')
-                    else:
-                        self._log('warn', 'Không capture được token sau sync — vẫn chạy, retry khi có task')
+                if self.worker_mode == 'api':
+                    self._log('ok', 'API mode (batchexecute) — sẵn sàng nhận task')
                 else:
                     self._log('ok', 'DOM mode — sẵn sàng nhận task (không cần token)')
 
@@ -9615,11 +8756,6 @@ class SeleniumFlowWorker:
                     break
 
                 self._drain_browser_logs()
-                if self.worker_mode == 'api':
-                    self._drain_perf_logs()
-                    self._capture_tb_credentials()
-                    if self.token_age_secs() > 600:
-                        self._get_fresh_recaptcha()
 
                 try:
                     tasks = self._heartbeat()

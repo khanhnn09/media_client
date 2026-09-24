@@ -240,6 +240,25 @@ def open_browser(pid):
 
         port = _chrome_debug_port(pid)
 
+        # CloakBrowser — luồng riêng (server/cloak_browser.py)
+        from .cloak_browser import cloak_enabled, open_cloak_driver
+        if cloak_enabled():
+            driver = open_cloak_driver(profile, port, detach=True, load_extensions=True,
+                                       log_fn=lambda lv, m: _profile_log(pid, lv, m))
+            _login_drivers[pid] = driver
+            url = profile.get('project_url') or 'https://accounts.google.com'
+            driver.get(url)
+            _profile_log(pid, 'info', f'Login browser (CloakBrowser) opened → {url} (port={port})')
+            try:
+                while True:
+                    time.sleep(3)
+                    _ = driver.current_url
+            except Exception:
+                pass
+            finally:
+                _login_drivers.pop(pid, None)
+            return
+
         # Chọn Chrome Portable nếu có
         portable_exe = ''
         portables    = _detect_chrome_portables()
@@ -350,11 +369,9 @@ def get_token_status(pid):
     w, _ = _workers[pid]
     t = w._tokens
     return jsonify({
-        'running':    True,
-        'hasAuth':    bool(t.get('authorization')),
+        'running':      True,
         'hasRecaptcha': bool(t.get('recaptchaToken')),
-        'ageSeconds': round(w.token_age_secs()),
-        'authPreview': (t.get('authorization') or '')[:30],
+        'ageSeconds':   round(w.token_age_secs()),
     })
 
 
@@ -424,8 +441,6 @@ def get_status():
             p['debug_port']     = _chrome_debug_port(pid)
             if pid in _workers:
                 w, _ = _workers[pid]
-                p['has_tokens'] = w.has_tokens()
-                p['token_age']  = round(w.token_age_secs())
                 p.update(w.live_info())
             elif p.get('status') == 'sleeping':
                 # Worker thread đã thoát (xem _handle_task_error) — sleepUntil chỉ còn

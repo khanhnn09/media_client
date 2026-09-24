@@ -79,12 +79,10 @@ class LogsPage(QWidget):
 
         # Token bar
         tok_bar = QHBoxLayout(); tok_bar.setSpacing(8)
-        tok_lbl = QLabel('Tokens:')
+        tok_lbl = QLabel('reCAPTCHA:')
         tok_lbl.setStyleSheet(f'color:{C["muted"]}; font-size:11px; font-weight:600; background:transparent;')
-        self._tok_auth = Badge('—  Auth',       'gray')
-        self._tok_rc   = Badge('—  reCAPTCHA',  'gray')
+        self._tok_rc   = Badge('—',  'gray')
         tok_bar.addWidget(tok_lbl)
-        tok_bar.addWidget(self._tok_auth)
         tok_bar.addWidget(self._tok_rc)
         tok_bar.addStretch()
         lay.addLayout(tok_bar)
@@ -139,8 +137,7 @@ class LogsPage(QWidget):
             self._sub.setText(f'Profile [{pid}]')
             self.reload()
         else:
-            self._tok_auth.set('—  Auth',       'gray')
-            self._tok_rc  .set('—  reCAPTCHA',  'gray')
+            self._tok_rc  .set('—',  'gray')
 
     def _pid(self) -> int | None:
         return self._profile_cb.currentData()
@@ -194,16 +191,12 @@ class LogsPage(QWidget):
     def _render_tokens(self, data):
         if not isinstance(data, dict): return
         if not data.get('running'):
-            self._tok_auth.set('Worker offline', 'gray')
-            self._tok_rc  .set('—', 'gray'); return
-        has_a = data.get('hasAuth',False)
+            self._tok_rc  .set('Worker offline', 'gray'); return
         has_r = data.get('hasRecaptcha',False)
         age   = data.get('ageSeconds')
-        self._tok_auth.set(f'✔  Auth ({age}s)' if has_a and age is not None else
-                           '✔  Auth' if has_a else '✘  No Auth',
-                           'green' if has_a else 'red')
-        self._tok_rc  .set('✔  reCAPTCHA' if has_r else '✘  No reCAPTCHA',
-                           'green' if has_r else 'red')
+        self._tok_rc  .set(f'✔  {age}s trước' if has_r and age is not None else
+                           '✔' if has_r else '— chưa lấy',
+                           'green' if has_r else 'gray')
 
     def _clear(self):
         pid = self._pid()
