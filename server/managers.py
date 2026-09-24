@@ -435,7 +435,7 @@ class _ProfileManager:
                gemini_response_timeout=300, max_concurrent=1, enabled=1,
                gemini_max_concurrent_tabs=1, gemini_tab_switch_interval=0.5,
                chatgpt_attach_timeout=60, chatgpt_response_timeout=300,
-               proxy_server='', run_hours='') -> int:
+               proxy_server='', run_hours='', totp_secret='') -> int:
         profile_dir = str(Path(PROFILES_DIR) / name)
         os.makedirs(profile_dir, exist_ok=True)  # cục bộ — user-data-dir chỉ có ý nghĩa trên máy này
         # (2026-08-07) 'gemini_video' — BUG THẬT đã sót ở đây từ lúc thêm loại
@@ -456,6 +456,7 @@ class _ProfileManager:
         r = _api('POST', '/api/worker_profiles', body={
             'profile_name': name, 'display_name': display_name, 'profile_dir': profile_dir,
             'account_email': email, 'account_password': password,
+            'account_totp_secret': (totp_secret or '').strip(),
             'proxy_server': (proxy_server or '').strip(),
             'run_hours': format_run_hours(run_hours),
             'project_url': project_url, 'task_mode': task_mode,
@@ -471,7 +472,8 @@ class _ProfileManager:
         return r.get('id', 0)
 
     def update(self, profile_id: int, **fields):
-        allowed = {'profile_name', 'display_name', 'account_email', 'account_password', 'project_url',
+        allowed = {'profile_name', 'display_name', 'account_email', 'account_password', 'account_totp_secret',
+                   'project_url',
                    'task_mode', 'worker_mode', 'notes', 'enabled', 'proxy_server', 'run_hours',
                    'gemini_attach_timeout', 'gemini_response_timeout', 'max_concurrent',
                    'gemini_max_concurrent_tabs', 'gemini_tab_switch_interval',

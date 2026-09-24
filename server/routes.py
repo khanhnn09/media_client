@@ -53,6 +53,7 @@ def create_profile():
             name,
             email                    = d.get('account_email', ''),
             password                 = d.get('account_password', ''),
+            totp_secret              = d.get('account_totp_secret', ''),
             display_name             = d.get('display_name', ''),
             project_url              = d.get('project_url', ''),
             task_mode                = d.get('task_mode', 'all'),

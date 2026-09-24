@@ -10,7 +10,7 @@ NGUYÊN trong file này nhưng ĐÃ CẤT: chỉ chạy khi setting
 
 import base64, json, os, random, re, shutil, sys, tempfile, threading, time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 
 try:
     from curl_cffi import requests as cf_requests
@@ -1452,6 +1452,52 @@ class SeleniumFlowWorker:
         except (TypeError, ValueError):
             return False
 
+    def _api_dom_fallback_enabled(self) -> bool:
+        """(2026-09-24) Setting "API lỗi thì chuyển sang DOM" — chỉ có nghĩa với
+        profile `worker_mode='api'`. Mặc định TẮT: API mode CHỈ chạy API. Đọc
+        tươi settings cục bộ để bật/tắt có tác dụng ngay ở lô kế tiếp."""
+        if getattr(self, 'worker_mode', '') != 'api':
+            return False
+        try:
+            return bool(int(get_local_settings().get('api_fallback_to_dom', 0) or 0))
+        except (TypeError, ValueError):
+            return False
+
+    def _api_task_failed(self, task: dict, err, dom_queue) -> bool:
+        """Xử lý 1 task lỗi ở đường API. `dom_queue` là list (setting chuyển DOM
+        đang BẬT) → đưa task vào hàng chờ chạy lại bằng DOM, CHƯA báo lỗi về
+        server (báo lỗi = server nhả task về hàng chờ, máy khác có thể nhận
+        trùng trong lúc ta đang chạy DOM). `dom_queue=None` → báo lỗi như cũ.
+        Trả True nếu escalation cho profile ngủ."""
+        task_id = task['id']
+        msg = str(err)
+        if dom_queue is not None:
+            self._log('warn', f'[api→dom] Task #{task_id} lỗi API ({msg[:200]}) '
+                              f'→ sẽ chạy lại bằng DOM')
+            if all(t['id'] != task_id for t in dom_queue):
+                dom_queue.append(task)
+            return False
+        self._log('error', f'Task #{task_id} lỗi API: {msg}')
+        self._report_task_error(task_id, msg)
+        return self._handle_task_error(msg)
+
+    def _run_dom_fallback(self, tasks: list) -> bool:
+        """Chạy lại các task lỗi API bằng luồng DOM (`_run_tasks_batch()` —
+        configure → đính ảnh tham chiếu → gõ prompt → reconcile). Trả True nếu
+        escalation cho profile ngủ."""
+        if not tasks:
+            return False
+        ids = ', '.join(f"#{t['id']}" for t in tasks)
+        self._log('warn', f'[api→dom] Chạy lại {len(tasks)} task bằng DOM: {ids}')
+        try:
+            return bool(self._run_tasks_batch(tasks))
+        except Exception as e:
+            msg = f'Chạy DOM (fallback từ API) lỗi: {e}'
+            self._log('error', f'[api→dom] {msg}')
+            for t in tasks:
+                self._report_task_error(t['id'], msg)
+            return bool(self._handle_task_error(msg))
+
     def _bound_url(self) -> str:
         """Link project Flow đang gán cho lô hiện tại ('' = không gán)."""
         return getattr(self, '_bound_flow_url', '') or ''
@@ -1680,6 +1726,12 @@ class SeleniumFlowWorker:
             except Exception as e:
                 self._log('warn', f'[project] Vào lại project cũ lỗi (lần {i}/{attempts}): {e}')
                 continue
+            # (2026-09-24) Bị đá về flow.google.com/about (phiên hết hiệu lực,
+            # thường do đổi proxy) → chạy lại quy trình check đăng nhập rồi vào
+            # lại đúng project, thay vì coi project là hỏng.
+            if self._on_flow_about_page():
+                if not self._relogin_after_flow_about(saved):
+                    return False
             # Màn hình xen giữa có thể hiện LẠI ở mỗi lần vào (session mới) —
             # phải check mỗi vòng, không chỉ vòng đầu.
             self._click_create_with_flow_if_present()
@@ -2282,6 +2334,275 @@ class SeleniumFlowWorker:
         self._cdp_click_el(btn)
         return True
 
+    # ── 2FA Google Authenticator (2026-09-24, CLAUDE.md §11.58) ─────────────
+    # Theo yêu cầu user "mỗi lần đổi proxy tài khoản google phải xác nhận...
+    # đọc tài khoản 2FA google authentication để tự điền". Profile lưu khoá bí
+    # mật base32 (`account_totp_secret`), `pyotp` sinh mã 6 số y hệt app
+    # Authenticator. `_google_signin_flow()` đọc trang ĐANG HIỆN rồi làm đúng
+    # bước đó (email / mật khẩu / mã 2FA / "Thử cách khác" → chọn Authenticator)
+    # thay vì chạy cứng 1 chuỗi — trang xác minh sau khi đổi proxy có thể bắt
+    # đầu thẳng ở bước mật khẩu hoặc bước 2FA, không qua bước email.
+    _GOOGLE_TRY_ANOTHER_KEYWORDS = ('try another way', 'thử cách khác')
+    _GOOGLE_SIGNIN_STATE_JS = """
+        var email = (arguments[0] || '').toLowerCase();
+        var vis = function(el){ return !!el && el.getClientRects().length > 0; };
+        var q = function(s){ return [...document.querySelectorAll(s)].find(vis) || null; };
+        var path = location.pathname || '';
+        var totp = q('#totpPin, input[name="totpPin"]');
+        if (!totp && path.indexOf('/challenge/totp') !== -1)
+            totp = q('input[type="tel"], input[type="text"], input[type="number"]');
+        if (totp) return {step: 'totp', el: totp};
+        var pw = [...document.querySelectorAll('input[type="password"], input[name="Passwd"]')]
+            .find(function(el){ return vis(el) && el.name !== 'hiddenPassword'; });
+        if (pw) return {step: 'password', el: pw};
+        var em = q('#identifierId, input[name="identifier"], input[type="email"]');
+        if (em) return {step: 'email', el: em, value: em.value || ''};
+        if (email) {
+            var acct = [...document.querySelectorAll('[data-identifier]')].find(function(el){
+                return vis(el) && (el.getAttribute('data-identifier') || '').toLowerCase() === email;
+            });
+            if (acct) return {step: 'account', el: acct};
+        }
+        var opt = q('[data-challengetype="6"]');
+        if (!opt) opt = [...document.querySelectorAll('[role="link"], li, button, div[data-challengeid]')]
+            .find(function(el){
+                return vis(el) && /authenticator/i.test(el.textContent || '') && (el.textContent || '').length < 200;
+            }) || null;
+        if (opt) return {step: 'choose_totp', el: opt};
+        var kw = arguments[1] || [];
+        var another = [...document.querySelectorAll('button, [role="button"], [role="link"]')]
+            .find(function(el){
+                var t = (el.textContent || '').trim().toLowerCase();
+                return vis(el) && kw.some(function(k){ return t.indexOf(k) === 0; });
+            });
+        if (another) return {step: 'try_another', el: another};
+        return {step: 'unknown'};
+    """
+
+    def _totp_code(self) -> str:
+        """Mã 6 số hiện tại từ khoá bí mật đã lưu, '' nếu chưa cấu hình/khoá hỏng."""
+        secret = (self.profile.get('account_totp_secret') or '').replace(' ', '').strip().upper()
+        if not secret:
+            return ''
+        try:
+            import pyotp
+            return pyotp.TOTP(secret).now()
+        except Exception as e:
+            self._log('error', f'[google-login] Khoá 2FA không hợp lệ ({e}) — kiểm tra lại '
+                                f'ô "Khoá 2FA" trong profile (chuỗi base32, không phải mã 6 số).')
+            return ''
+
+    def _on_google_challenge(self) -> bool:
+        try:
+            return 'accounts.google.com' in (self.driver.current_url or '')
+        except Exception:
+            return False
+
+    def _on_flow_about_page(self) -> bool:
+        """(2026-09-24) Trang giới thiệu `https://flow.google.com/about` — Flow
+        đá về đây khi vào link project mà phiên đăng nhập không còn hợp lệ
+        (hay gặp ngay sau khi đổi proxy/IP). Khác màn hình xen giữa "Create with
+        Google Flow" (§11.28, URL vẫn giữ `/project/`)."""
+        try:
+            u = urlparse(self.driver.current_url or '')
+        except Exception:
+            return False
+        host = (u.hostname or '').lower()
+        return host == 'flow.google.com' and (u.path or '').rstrip('/').startswith('/about')
+
+    def _relogin_after_flow_about(self, target_url: str) -> bool:
+        """Bị đá về `flow.google.com/about` → chạy lại quy trình check đăng nhập
+        (ÉP chạy, bỏ qua setting `google_login_check_enabled`) rồi vào lại
+        `target_url`. Trả True nếu cuối cùng không còn kẹt ở /about.
+
+        Gọi lồng: bên trong `_ensure_google_login()` lại đi qua
+        `_nav_target_and_resolve_challenge()` → thấy /about lần nữa → KHÔNG đệ
+        quy (cờ `_about_relogin_active`), để hàm ngoài xử lý tiếp."""
+        if getattr(self, '_about_relogin_active', False):
+            return True
+        self._about_relogin_active = True
+        try:
+            self._log('warn', f'[google-login] Vào {target_url} bị đá về flow.google.com/about '
+                              f'(phiên đăng nhập hết hiệu lực, thường do đổi proxy) — '
+                              f'chạy lại quy trình check đăng nhập…')
+            _force_login_check.add(self.profile_id)
+            ok = self._ensure_google_login(target_url)
+            if not ok:
+                self._log('error', '[google-login] Check đăng nhập lại thất bại — cần đăng nhập '
+                                   'thủ công qua "Mở login browser".')
+                return False
+            if not self._on_flow_about_page():
+                self._log('ok', '[google-login] ✔ Đã đăng nhập lại, vào được trang Flow')
+                return True
+            # Đã đăng nhập Google mà Flow vẫn ở /about — thử nút "Create with
+            # Google Flow" trên trang đó rồi vào lại đúng link 1 lần.
+            self._click_create_with_flow_if_present()
+            try:
+                self._nav_get(target_url, 'vào lại trang sau khi đăng nhập lại (/about)')
+                self._sleep(4)
+            except Exception as e:
+                self._log('warn', f'[google-login] Vào lại {target_url} lỗi: {e}')
+            self._click_create_with_flow_if_present()
+            if self._on_flow_about_page():
+                self._log('error', '[google-login] Đã đăng nhập lại nhưng Flow vẫn đá về '
+                                   'flow.google.com/about — cần kiểm tra tài khoản/proxy thủ công.')
+                return False
+            return True
+        finally:
+            self._about_relogin_active = False
+
+    def _google_signin_flow(self, target_url: str, timeout: float = 120) -> bool:
+        """Hoàn tất đăng nhập/xác minh Google từ BẤT KỲ bước nào đang hiện trên
+        accounts.google.com, rồi vào `target_url`. Mỗi loại hành động có giới hạn
+        số lần để không lặp vô hạn (vd sai mật khẩu Google trả lại đúng trang cũ).
+        Trả False khi gặp bước không tự động được (bấm "Có" trên điện thoại,
+        SMS, captcha...) hoặc thiếu email/mật khẩu/khoá 2FA cần cho bước đó."""
+        email    = (self.profile.get('account_email') or '').strip()
+        password = self.profile.get('account_password') or ''
+        has_totp = bool((self.profile.get('account_totp_secret') or '').strip())
+        counts: dict = {}
+        last_code = ''
+        unknown_since = None
+        deadline = time.time() + timeout
+
+        def _bump(step, limit):
+            counts[step] = counts.get(step, 0) + 1
+            return counts[step] <= limit
+
+        def _type_into(el, text):
+            self._cdp_click_el(el)
+            self._sleep(0.3)
+            self._js('arguments[0].value = "";', el)
+            self._cdp('Input.insertText', {'text': text})
+
+        while time.time() < deadline:
+            if not self._on_google_challenge():
+                try:
+                    now_url = self.driver.current_url or ''
+                except Exception:
+                    now_url = ''
+                self._log('ok', f'[google-login] ✔ Đã qua trang đăng nhập/xác minh → {now_url[:120]}')
+                self._nav_get(target_url, 'vừa tự đăng nhập/xác minh Google xong — vào trang cần thiết')
+                self._sleep(3)
+                return True
+            try:
+                st = self.driver.execute_script(self._GOOGLE_SIGNIN_STATE_JS, email,
+                                                list(self._GOOGLE_TRY_ANOTHER_KEYWORDS)) or {}
+            except Exception:
+                st = {}
+            step = st.get('step') or 'unknown'
+            el = st.get('el')
+            if step != 'unknown':
+                unknown_since = None
+            try:
+                if step == 'email':
+                    if not email:
+                        self._log('error', '[google-login] Google hỏi email nhưng profile chưa lưu Email.')
+                        return False
+                    if not _bump('email', 3):
+                        break
+                    if (st.get('value') or '').strip().lower() != email.lower():
+                        _type_into(el, email)
+                    self._log('info', f'[google-login] Nhập email ({email})')
+                    self._click_google_next('identifier')
+                    self._sleep(3)
+                elif step == 'account':
+                    if not _bump('account', 2):
+                        break
+                    self._log('info', f'[google-login] Chọn tài khoản {email} trong danh sách')
+                    self._cdp_click_el(el)
+                    self._sleep(3)
+                elif step == 'password':
+                    if not password:
+                        self._log('error', '[google-login] Google hỏi mật khẩu nhưng profile chưa lưu Mật khẩu.')
+                        return False
+                    if not _bump('password', 2):
+                        self._log('error', '[google-login] Vẫn bị hỏi mật khẩu sau 2 lần nhập — có thể sai mật khẩu.')
+                        return False
+                    _type_into(el, password)
+                    self._log('info', '[google-login] Đã nhập mật khẩu')
+                    self._click_google_next('password')
+                    self._sleep(3)
+                elif step == 'totp':
+                    if not has_totp:
+                        self._log('error', '[google-login] Google hỏi mã xác minh 2 bước nhưng profile chưa '
+                                            'có "Khoá 2FA" — điền khoá Authenticator vào profile hoặc xác '
+                                            'minh thủ công qua "Mở login browser".')
+                        return False
+                    if not _bump('totp', 3):
+                        self._log('error', '[google-login] Mã 2FA bị từ chối 3 lần — kiểm tra lại khoá 2FA '
+                                            'và giờ hệ thống của máy (lệch giờ làm mã sai).')
+                        return False
+                    code = self._totp_code()
+                    if not code:
+                        return False
+                    # Mã trước bị từ chối thì chờ sang chu kỳ 30s kế tiếp, không gửi lại đúng mã đó.
+                    wait_until = time.time() + 31
+                    while code == last_code and time.time() < wait_until:
+                        self._sleep(1)
+                        code = self._totp_code()
+                    last_code = code
+                    _type_into(el, code)
+                    self._log('info', '[google-login] Đã điền mã 2FA từ Authenticator')
+                    self._click_google_next('totp')
+                    self._sleep(4)
+                elif step == 'choose_totp':
+                    if not has_totp:
+                        self._log('error', '[google-login] Trang chọn cách xác minh nhưng profile chưa có '
+                                            '"Khoá 2FA" — cần xác minh thủ công.')
+                        return False
+                    if not _bump('choose_totp', 2):
+                        break
+                    self._log('info', '[google-login] Chọn xác minh bằng Google Authenticator')
+                    self._cdp_click_el(el)
+                    self._sleep(3)
+                elif step == 'try_another':
+                    if not has_totp or not _bump('try_another', 2):
+                        self._log('error', '[google-login] Google yêu cầu xác minh bằng cách khác (bấm "Có" '
+                                            'trên điện thoại/SMS...) và không chuyển được sang Authenticator '
+                                            '— cần xác minh thủ công qua "Mở login browser".')
+                        return False
+                    self._log('info', '[google-login] Bấm "Thử cách khác" để chuyển sang Authenticator')
+                    self._cdp_click_el(el)
+                    self._sleep(3)
+                else:
+                    # Trang đang chuyển tiếp/loading — chờ; đứng yên quá 20s thì bỏ cuộc.
+                    unknown_since = unknown_since or time.time()
+                    if time.time() - unknown_since > 20:
+                        break
+                    self._sleep(1)
+            except Exception as e:
+                self._log('warn', f'[google-login] Lỗi ở bước "{step}": {e}')
+                self._sleep(2)
+
+        try:
+            now_url = self.driver.current_url or ''
+        except Exception:
+            now_url = ''
+        self._log('error', f'[google-login] Không tự hoàn tất được đăng nhập/xác minh Google '
+                            f'(dừng ở {now_url[:120]}) — cần xử lý thủ công qua "Mở login browser".')
+        return False
+
+    def _nav_target_and_resolve_challenge(self, target_url: str, reason: str) -> bool:
+        """Vào thẳng `target_url`; nếu bị đá sang accounts.google.com (đổi proxy/IP
+        khiến Google bắt xác minh lại) thì tự hoàn tất bằng `_google_signin_flow()`
+        — áp dụng kể cả khi setting check đăng nhập đang TẮT (§11.58)."""
+        try:
+            self._nav_get(target_url, reason)
+            self._sleep(3)
+        except Exception as e:
+            self._log('warn', f'[google-login] Navigate {target_url} lỗi: {e}')
+            return True
+        if self._on_flow_about_page():
+            return self._relogin_after_flow_about(target_url)
+        if not self._on_google_challenge():
+            return True
+        self._log('warn', '[google-login] Bị chuyển sang trang đăng nhập/xác minh Google — tự xử lý…')
+        ok = self._google_signin_flow(target_url)
+        if ok and self._on_flow_about_page():
+            return self._relogin_after_flow_about(target_url)
+        return ok
+
     def _ensure_google_login(self, target_url: str) -> bool:
         """(2026-08-10, ĐỔI HƯỚNG theo yêu cầu user "viết lại luồng check bằng
         cách vào https://gmail.com/ ko vào accounts.google.com nữa") — thay vì
@@ -2343,12 +2664,8 @@ class SeleniumFlowWorker:
         # gemini.google.com qua SSO ngay khi navigate lại, KHÔNG cần dò/nhập
         # tay như VEO/labs.google.
         if not forced and self.worker_mode in ('gemini', 'gemini_video', 'gemini_image'):
-            try:
-                self._nav_get(target_url, 'Gemini: vào thẳng trang (không check đăng nhập)')
-                self._sleep(3)
-            except Exception as e:
-                self._log('warn', f'[google-login] (Gemini, bỏ qua check) Navigate {target_url} lỗi: {e}')
-            return True
+            return self._nav_target_and_resolve_challenge(
+                target_url, 'Gemini: vào thẳng trang (không check đăng nhập)')
         if forced:
             _force_login_check.discard(self.profile_id)
             self._log('warn', '[google-login] Vừa xoá TẤT CẢ cookie ở lần ngủ trước — ÉP '
@@ -2356,12 +2673,8 @@ class SeleniumFlowWorker:
                                'google_login_check_enabled đang tắt).')
 
         if not forced and not self._server_settings.get('google_login_check_enabled'):
-            try:
-                self._nav_get(target_url, 'check đăng nhập đang TẮT — vào thẳng trang')
-                self._sleep(3)
-            except Exception as e:
-                self._log('warn', f'[google-login] (check TẮT) Navigate {target_url} lỗi: {e}')
-            return True
+            return self._nav_target_and_resolve_challenge(
+                target_url, 'check đăng nhập đang TẮT — vào thẳng trang')
 
         self._log('info', '[google-login] Kiểm tra trạng thái đăng nhập Google '
                            '(vào gmail.com trước)…')
@@ -2405,9 +2718,7 @@ class SeleniumFlowWorker:
         if 'mail.google.com' in current:
             self._log('ok', '[google-login] Đã đăng nhập sẵn (gmail.com → mail.google.com) — '
                              f'vào trang cần thiết: {target_url}')
-            self._nav_get(target_url, 'đã đăng nhập sẵn — vào trang cần thiết')
-            self._sleep(3)
-            return True
+            return self._nav_target_and_resolve_challenge(target_url, 'đã đăng nhập sẵn — vào trang cần thiết')
 
         if 'workspace.google.com' not in current:
             # (2026-08-10) URL redirect không khớp CẢ 2 case đã biết (hiếm —
@@ -2417,9 +2728,8 @@ class SeleniumFlowWorker:
             # false-positive chặn worker" của bản trước).
             self._log('warn', f'[google-login] URL sau gmail.com không như dự kiến ({current}) — '
                                f'thử thẳng {target_url}')
-            self._nav_get(target_url, 'URL sau gmail.com không như dự kiến — vào thẳng trang')
-            self._sleep(3)
-            return True
+            return self._nav_target_and_resolve_challenge(
+                target_url, 'URL sau gmail.com không như dự kiến — vào thẳng trang')
 
         self._log('warn', '[google-login] CHƯA đăng nhập (gmail.com → workspace.google.com) — '
                            'tìm nút "Sign in"…')
@@ -2481,86 +2791,10 @@ class SeleniumFlowWorker:
             self._log('warn', f'[google-login] Không đóng được tab workspace.google.com cũ ({e}) — bỏ qua')
         self.driver.switch_to.window(new_handle)
 
-        # (2026-08-08) Selector CHAIN đã verify qua DOM thật — ưu tiên
-        # `#identifierId`/`name="identifier"` (ổn định, xác nhận qua probe),
-        # `input[type="email"]` chỉ còn là fallback cuối (KHÔNG khớp bản DOM
-        # hiện tại — type thật là "text" — giữ lại phòng Google đổi lại).
-        email_input = self._wait_js("""
-            return document.querySelector('#identifierId') ||
-                   document.querySelector('input[name="identifier"]') ||
-                   document.querySelector('input[type="email"]') || null;
-        """, timeout=8.0)
-        if not email_input:
-            self._log('error', '[google-login] Vào trang đăng nhập nhưng không thấy ô nhập email '
-                                '— DOM có thể đã đổi khác. Cần đăng nhập thủ công qua "Mở login browser".')
-            return False
-
-        email    = (self.profile.get('account_email') or '').strip()
-        password = self.profile.get('account_password') or ''
-        if not email or not password:
-            self._log('error', '[google-login] Chưa có Email/Mật khẩu lưu sẵn cho profile này '
-                                '— không thể tự đăng nhập. Sửa profile để điền Email + Mật khẩu, '
-                                'hoặc bấm "Mở login browser" để đăng nhập thủ công 1 lần.')
-            return False
-
-        try:
-            self._cdp_click_el(email_input)
-            self._sleep(0.3)
-            self._cdp('Input.insertText', {'text': email})
-            self._log('info', f'[google-login] Đã nhập email ({email})')
-            if not self._click_google_next('identifier'):
-                self._log('error', '[google-login] Không tìm thấy nút "Tiếp theo" sau bước email')
-                return False
-            self._sleep(2)
-
-            # (2026-08-08) LỌC THEO VISIBILITY — bước email (trang trước) đã
-            # có sẵn 1 input ẩn `name="hiddenPassword" type="password"`
-            # (decoy/chống autofill, xác nhận qua probe DOM thật) — nếu không
-            # lọc visible, có thể khớp nhầm field ẩn này. `input[name="Passwd"]`
-            # thêm vào làm tín hiệu phụ (khớp DOM thật xác nhận qua probe).
-            pw_input = self._wait_js("""
-                var all = [...document.querySelectorAll('input[type="password"],input[name="Passwd"]')]
-                    .filter(function(el){ return el.getClientRects().length>0; });
-                return all[0] || null;
-            """, timeout=15.0)
-            if not pw_input:
-                self._log('error', '[google-login] Không tìm thấy ô nhập mật khẩu sau bước email '
-                                    '— Google có thể đang yêu cầu bước xác minh khác (chọn tài '
-                                    'khoản, captcha, xác nhận số điện thoại...) không tự động hoá '
-                                    'được. Cần đăng nhập thủ công qua "Mở login browser".')
-                return False
-            self._cdp_click_el(pw_input)
-            self._sleep(0.3)
-            self._cdp('Input.insertText', {'text': password})
-            self._log('info', '[google-login] Đã nhập mật khẩu')
-            if not self._click_google_next('password'):
-                self._log('error', '[google-login] Không tìm thấy nút "Tiếp theo" sau bước mật khẩu')
-                return False
-
-            # Chờ rời khỏi accounts.google.com (thành công) hoặc hết thời gian
-            # (sai mật khẩu / cần xác minh thêm — Google sẽ giữ nguyên trên
-            # accounts.google.com, không có tín hiệu lỗi chung nào đủ ổn định
-            # để phân biệt chi tiết, nên chỉ dựa vào việc CÓ RỜI ĐƯỢC hay không).
-            deadline = time.time() + 30
-            while time.time() < deadline:
-                self._sleep(1)
-                try:
-                    now_url = self.driver.current_url or ''
-                except Exception:
-                    now_url = ''
-                if 'accounts.google.com' not in now_url:
-                    self._log('ok', f'[google-login] ✔ Đăng nhập thành công → {now_url[:120]}')
-                    self._nav_get(target_url, 'vừa tự đăng nhập Google xong — vào trang cần thiết')
-                    self._sleep(3)
-                    return True
-
-            self._log('error', '[google-login] Sau 30s vẫn ở trang đăng nhập Google — có thể sai '
-                                'mật khẩu hoặc Google yêu cầu xác minh 2 bước/captcha, không tự '
-                                'động hoá tiếp được. Cần đăng nhập thủ công qua "Mở login browser".')
-            return False
-        except Exception as e:
-            self._log('error', f'[google-login] Lỗi khi tự đăng nhập: {e}')
-            return False
+        # (2026-09-24) Các bước email/mật khẩu/2FA giờ do `_google_signin_flow()`
+        # xử lý theo trang ĐANG HIỆN (selector email/mật khẩu giữ nguyên như bản
+        # đã verify DOM thật 2026-08-08, xem `_GOOGLE_SIGNIN_STATE_JS`).
+        return self._google_signin_flow(target_url)
 
     def _ensure_flow_project(self):
         """Navigate đến project page (có CE input).
@@ -8536,7 +8770,7 @@ class SeleniumFlowWorker:
     # 1 lần heartbeat, xem §11.9 CLAUDE.md) nên không cần thêm giới hạn nào
     # khác — đúng đã là "N task/lần" mà user cấu hình.
 
-    def _run_image_tasks_concurrent(self, tasks: list) -> bool:
+    def _run_image_tasks_concurrent(self, tasks: list, dom_queue=None) -> bool:
         """N task ẢNH — MỖI task tự mint reCAPTCHA + khởi động thread Direct
         API riêng (ThreadPoolExecutor), thread ĐÃ khởi động chạy song song
         bình thường trong khi vòng lặp GIÃN CÁCH random
@@ -8557,13 +8791,11 @@ class SeleniumFlowWorker:
         if stagger_max < stagger_min:
             stagger_max = stagger_min
 
-        ui_tasks: list = []   # task thiếu điều kiện Direct API — UI-driven tuần tự
-        # Task nào bị 403/reCAPTCHA lỗi khi gọi song song (token vừa mint hoá
-        # ra đã hỏng/hết hạn ngay lúc dùng — hiếm nhưng có thể xảy ra) được
-        # RETRY qua UI-driven ở vòng sau, mirror ĐÚNG fallback đã có sẵn ở
-        # `_run_task_api()` (không âm thầm bỏ fallback này khi chuyển sang
-        # song song) — KHÔNG làm trong worker thread vì UI-driven cần driver.
-        retry_via_ui: list = []
+        # (2026-09-24) Task không đi được API (thiếu điều kiện / 403) — xử lý
+        # sau vòng song song: chuyển DOM nếu `dom_queue` (setting bật), ngược lại
+        # báo lỗi. KHÔNG còn tự rơi về UI-driven (`_run_task_api`) như trước —
+        # API mode mặc định CHỈ chạy API.
+        ui_tasks: list = []
         stop_now = False
         futures = {}
 
@@ -8620,14 +8852,7 @@ class SeleniumFlowWorker:
                     results_urls = fut.result()
                 except Exception as e:
                     err_str = str(e)
-                    if '403' in err_str or 'recaptcha' in err_str.lower():
-                        self._log('warn', f'Task #{task_id} 403 (song song) → '
-                                           f'retry UI-driven: {e}')
-                        retry_via_ui.append(task)
-                        continue
-                    self._log('error', f'Task #{task_id} lỗi (song song): {e}')
-                    self._report_task_error(task_id, err_str)
-                    if self._handle_task_error(err_str):
+                    if self._api_task_failed(task, f'(song song) {err_str}', dom_queue):
                         stop_now = True
                     continue
                 self._log('ok', f'✔ Task #{task_id} — {len(results_urls)} image(s) (song song)')
@@ -8650,19 +8875,19 @@ class SeleniumFlowWorker:
                     if self._handle_task_error(str(e)):
                         stop_now = True
 
-        ui_tasks = ui_tasks + retry_via_ui
-        if ui_tasks and not stop_now and not self._stop.is_set():
-            delay = self._server_settings.get('task_delay_secs', 10)
-            for i, task in enumerate(ui_tasks):
-                if self._stop.is_set() or stop_now:
-                    break
-                stop_now = self._run_task_api(task)
-                if i < len(ui_tasks) - 1 and not stop_now:
-                    self._stop.wait(delay)
+        for task in ui_tasks:
+            if stop_now:
+                self._report_task_error(task['id'], 'Dừng trước khi generate (profile chuyển sang ngủ)')
+                continue
+            reason = ('không có token/phiên API' if not self.can_generate_via_api()
+                      else 'không có project id' if not self._extract_project_id()
+                      else 'không lấy được reCAPTCHA')
+            if self._api_task_failed(task, f'Không gọi được API tạo ảnh ({reason})', dom_queue):
+                stop_now = True
 
         return stop_now
 
-    def _run_video_tasks_staggered(self, tasks: list) -> tuple:
+    def _run_video_tasks_staggered(self, tasks: list, dom_queue=None) -> tuple:
         """N task VIDEO — upload ref (nếu có, NGAY TRƯỚC lúc khởi động CHÍNH
         task đó — KHÔNG còn upload cả lô 1 lượt trước khi generate như bản
         cũ 2026-08-13) + mint reCAPTCHA rồi khởi động thread submit, GIÃN
@@ -8721,9 +8946,7 @@ class SeleniumFlowWorker:
                     if not captcha:
                         raise RuntimeError('Không lấy được reCAPTCHA VIDEO_GENERATION')
                 except Exception as e:
-                    self._log('error', f'Task #{task_id} lỗi (chuẩn bị): {e}')
-                    self._report_task_error(task_id, str(e))
-                    if self._handle_task_error(str(e)):
+                    if self._api_task_failed(task, f'(chuẩn bị) {e}', dom_queue):
                         stop_now = True
                         break
                     prepared = False
@@ -8753,9 +8976,7 @@ class SeleniumFlowWorker:
                 try:
                     fut.result()
                 except Exception as e:
-                    self._log('error', f'Task #{task_id} lỗi (song song): {e}')
-                    self._report_task_error(task_id, str(e))
-                    if self._handle_task_error(str(e)):
+                    if self._api_task_failed(task, f'(song song) {e}', dom_queue):
                         stop_now = True
                     continue
                 self._log('ok', f'✔ Task #{task_id} — đã submit (song song)')
@@ -8846,14 +9067,19 @@ class SeleniumFlowWorker:
         video_tasks = [t for t in tasks if 'video' in (t.get('mode') or '').lower()]
         video_pending: dict = {}
         stop_now = False
+        # (2026-09-24) Setting "API lỗi thì chuyển sang DOM": BẬT → task lỗi API
+        # gom vào đây, chạy lại bằng DOM ở cuối lô; TẮT (mặc định) → None, task
+        # lỗi API báo lỗi về server như cũ, KHÔNG đụng DOM.
+        dom_queue = [] if self._api_dom_fallback_enabled() else None
 
         if image_tasks:
-            stop_now = self._run_image_tasks_concurrent(image_tasks)
+            stop_now = self._run_image_tasks_concurrent(image_tasks, dom_queue=dom_queue)
 
         attempted_ids: set = set()
         if video_tasks and not stop_now and not self._stop.is_set():
             self._ensure_api_ready(timeout=45)
-            video_pending, stop_now, attempted_ids = self._run_video_tasks_staggered(video_tasks)
+            video_pending, stop_now, attempted_ids = self._run_video_tasks_staggered(
+                video_tasks, dom_queue=dom_queue)
             for task in video_tasks:
                 if task['id'] not in attempted_ids:
                     msg = 'Dừng trước khi generate (lô bị lỗi hoặc worker stop)'
@@ -8873,6 +9099,15 @@ class SeleniumFlowWorker:
                 if self._handle_task_error(msg):
                     stop_now = True
                     break
+
+        # Video đã submit API thành công nhưng chưa thấy kết quả KHÔNG vào đây
+        # (API có thể vẫn đang render — chạy DOM sẽ tạo trùng video).
+        if dom_queue:
+            if stop_now or self._stop.is_set():
+                for t in dom_queue:
+                    self._report_task_error(t['id'], 'Lỗi API, dừng trước khi kịp chạy DOM')
+            else:
+                stop_now = self._run_dom_fallback(dom_queue)
 
         if not stop_now:
             pm.set_status(self.profile_id, 'idle', clear_task=True,
@@ -9174,21 +9409,20 @@ class SeleniumFlowWorker:
                         results_urls = self._call_image_api_v2(task, captcha)
                         self._log('ok', f'✔ Task #{task_id} — {len(results_urls)} image(s) (direct API)')
                     except RuntimeError as api_err:
-                        # 403 reCAPTCHA invalid → fallback UI; lỗi khác → re-raise
-                        err_str = str(api_err)
-                        if '403' in err_str or 'recaptcha' in err_str.lower() or 'reCAPTCHA' in err_str:
-                            self._log('warn', f'Direct API 403 → fallback UI-driven: {api_err}')
-                            results_urls = self._generate_image_via_ui(task)
-                            self._log('ok', f'✔ Task #{task_id} — {len(results_urls)} image(s) (UI fallback)')
-                        else:
-                            raise
+                        # Mặc định CHỈ API — lỗi thì báo lỗi; bật setting mới chạy DOM.
+                        if self._api_dom_fallback_enabled():
+                            self._log('warn', f'[api→dom] Direct API lỗi → chạy DOM: {api_err}')
+                            return self._run_task_dom(task)
+                        raise
                 else:
                     reason = ('no auth' if not self.can_generate_via_api()
                               else 'no recaptcha' if not captcha
                               else 'no project_id')
-                    self._log('info', f'UI-driven ({reason})')
-                    results_urls = self._generate_image_via_ui(task)
-                    self._log('ok', f'✔ Task #{task_id} — {len(results_urls)} image(s) (UI)')
+                    if self._api_dom_fallback_enabled():
+                        self._log('warn', f'[api→dom] Không gọi được API ({reason}) → chạy DOM')
+                        return self._run_task_dom(task)
+                    raise RuntimeError(f'Không gọi được API tạo ảnh ({reason}) — '
+                                       f'chưa bật "API lỗi thì chuyển sang DOM"')
 
                 # (2026-08-14, fix bug thật "task hoàn tất nhưng không thấy
                 # media mới" khi Render lại) — ưu tiên `u['name']` (uuid THẬT,

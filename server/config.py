@@ -153,6 +153,15 @@ _DEFAULT_SERVER_SETTINGS = {
     # Flow đó được dùng LẠI làm ảnh tham chiếu bằng id đã lưu, không upload lại.
     # TẮT (0, mặc định): như cũ, và KHÔNG nhận task của project đã gán email.
     'bind_tasks_to_project_email': 0,
+    # (2026-09-24) API mode — lỗi thì chuyển sang DOM hay không. TẮT (0, mặc
+    # định): profile `worker_mode='api'` CHỈ chạy API — task lỗi API (hoặc không
+    # đủ điều kiện gọi API: thiếu reCAPTCHA/project id, 403...) báo lỗi về server
+    # để giao lại, KHÔNG tự gõ prompt qua giao diện. BẬT (1): các task đó được
+    # chạy lại NGAY trong cùng lô bằng luồng DOM (`_run_tasks_batch()` —
+    # configure/đính ảnh/gõ prompt trên trang Flow). Task video ĐÃ submit API
+    # thành công nhưng chưa thấy kết quả thì KHÔNG chuyển DOM (API có thể vẫn
+    # đang render — chạy DOM sẽ tạo trùng video).
+    'api_fallback_to_dom': 0,
     # (2026-08-20) Bậc thang escalation THEO BATCH — theo yêu cầu user: "Nếu batch
     # gửi lên 5 task 1 lúc mà thành công 1 vẫn tính batch thành công -> nhưng nếu
     # cả batch đều không thành công liên tiếp 2 batch liền -> thì mới xóa cache

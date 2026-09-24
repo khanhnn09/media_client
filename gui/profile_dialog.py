@@ -4,7 +4,7 @@ gemini timeout, max_concurrent...)."""
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFormLayout, QGridLayout, QHBoxLayout, QLabel,
-    QLineEdit, QMessageBox, QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
+    QLineEdit, QMessageBox, QPushButton, QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from server.run_hours import parse_run_hours, summarize_run_hours
@@ -53,11 +53,6 @@ class ProfileDialog(QDialog):
         lay.addWidget(sep())
         lay.addSpacing(20)
 
-        form = QFormLayout()
-        form.setSpacing(14)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        form.setFormAlignment(Qt.AlignmentFlag.AlignLeft)
-
         def field(placeholder='') -> QLineEdit:
             e = QLineEdit()
             e.setPlaceholderText(placeholder)
@@ -84,6 +79,12 @@ class ProfileDialog(QDialog):
         # khoản cá nhân.
         self._password = field('Mật khẩu Google (để trống nếu không cần tự đăng nhập lại)')
         self._password.setEchoMode(QLineEdit.EchoMode.Password)
+        # Khoá bí mật Google Authenticator (2026-09-24, CLAUDE.md §11.58) — lấy ở
+        # myaccount.google.com → Bảo mật → Authenticator → "Không quét được?".
+        # Worker dùng pyotp sinh mã 6 số khi Google hỏi xác minh 2 bước. Cùng
+        # rủi ro lưu PLAINTEXT với mật khẩu ở trên.
+        self._totp = field('Khoá Authenticator (base32, để trống nếu không bật 2FA)')
+        self._totp.setEchoMode(QLineEdit.EchoMode.Password)
         self._url      = field('vd: https://labs.google/fx/...flow')
         # ── Proxy RIÊNG của profile (2026-09-05, theo yêu cầu user "proxy
         # setting cho từng profile"). Áp dụng cho MỌI loại profile (VEO3/Gemini/
@@ -114,6 +115,7 @@ class ProfileDialog(QDialog):
             self._display.setText(self._p.get('display_name',''))
             self._email.setText(self._p.get('account_email',''))
             self._password.setText(self._p.get('account_password',''))
+            self._totp.setText(self._p.get('account_totp_secret','') or '')
             self._url.setText(self._p.get('project_url',''))
             self._proxy.setText(self._p.get('proxy_server','') or '')
             self._notes.setText(self._p.get('notes',''))
@@ -320,73 +322,97 @@ class ProfileDialog(QDialog):
             self._chatgpt_attach_to.setText('60')
             self._chatgpt_resp_to.setText('300')
 
-        form.addRow(label('Tên *'),    self._name)
-        form.addRow(label('Hiển thị'), self._display)
-        form.addRow(label('Email'),    self._email)
-        form.addRow(label('Mật khẩu'), self._password)
-        form.addRow(label('Trạng thái'), self._enabled_chk)
-        form.addRow(label('Loại *'),   self._type)
-        form.addRow(label('Flow URL'),         self._url)
-        form.addRow(label('Task mode'),        self._task_mode)
-        form.addRow(label('Worker mode'),      self._worker_mode)
-        form.addRow(label('Task nhận đồng thời'), self._max_concurrent)
-        form.addRow(label('Giờ chạy'), self._run_hours_w)
-        form.addRow(label('Attach timeout'),   self._gemini_attach_to)
-        form.addRow(label('Response timeout'), self._gemini_resp_to)
-        form.addRow(label('Số tab đồng thời'), self._gemini_max_tabs)
-        form.addRow(label('Giãn cách chuyển tab'), self._gemini_tab_interval)
-        form.addRow(label('Attach timeout'),   self._chatgpt_attach_to)
-        form.addRow(label('Response timeout'), self._chatgpt_resp_to)
-        form.addRow(label('Proxy'),   self._proxy)
-        form.addRow(label('Ghi chú'), self._notes)
+        # (2026-09-24, theo yêu cầu user "modal edit profile chia thành nhóm tab
+        # để tránh quá dài") — 4 tab, mỗi tab 1 QFormLayout RIÊNG trong vùng cuộn
+        # riêng. Tab "Giờ chạy" chỉ hiện với profile VEO3. Chiều cao dialog tính
+        # theo tab CAO NHẤT (xem `_fit_height()`) để đổi tab không làm cửa sổ nhảy.
+        def make_form() -> QFormLayout:
+            f = QFormLayout()
+            f.setSpacing(14)
+            f.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            f.setFormAlignment(Qt.AlignmentFlag.AlignLeft)
+            return f
 
-        # (2026-09-21) Form nằm TRONG vùng cuộn dọc — dialog này dài dần theo
-        # thời gian (khung giờ chạy 24 ô, timeout Gemini/ChatGPT, proxy...) nên
-        # ở màn hình thấp phần cuối bị tràn khỏi màn hình, không tới được nút
-        # Lưu. Tiêu đề + 2 nút Hủy/Lưu CỐ Ý nằm NGOÀI vùng cuộn để luôn thấy.
-        # Cùng pattern đã dùng ở `gui/pages/settings_page.py` (scroll trong
-        # suốt, chừa 4px máng cho thanh cuộn).
-        form_host = QWidget()
-        form_host.setStyleSheet('background:transparent;')
-        host_col = QVBoxLayout(form_host)
-        host_col.setContentsMargins(0, 0, 4, 0)
-        host_col.setSpacing(0)
-        host_col.addLayout(form)
+        f_acc, f_task, f_hours, f_misc = make_form(), make_form(), make_form(), make_form()
+        f_acc.addRow(label('Tên *'),    self._name)
+        f_acc.addRow(label('Hiển thị'), self._display)
+        f_acc.addRow(label('Email'),    self._email)
+        f_acc.addRow(label('Mật khẩu'), self._password)
+        f_acc.addRow(label('Khoá 2FA'), self._totp)
+        f_acc.addRow(label('Trạng thái'), self._enabled_chk)
+        f_acc.addRow(label('Loại *'),   self._type)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setStyleSheet('QScrollArea{border:none; background:transparent;}')
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setWidget(form_host)
-        lay.addWidget(scroll, 1)
+        f_task.addRow(label('Flow URL'),         self._url)
+        f_task.addRow(label('Task mode'),        self._task_mode)
+        f_task.addRow(label('Worker mode'),      self._worker_mode)
+        f_task.addRow(label('Task nhận đồng thời'), self._max_concurrent)
+        f_task.addRow(label('Attach timeout'),   self._gemini_attach_to)
+        f_task.addRow(label('Response timeout'), self._gemini_resp_to)
+        f_task.addRow(label('Số tab đồng thời'), self._gemini_max_tabs)
+        f_task.addRow(label('Giãn cách chuyển tab'), self._gemini_tab_interval)
+        f_task.addRow(label('Attach timeout'),   self._chatgpt_attach_to)
+        f_task.addRow(label('Response timeout'), self._chatgpt_resp_to)
 
-        self._form_host = form_host
-        self._scroll = scroll
-        self._form = form
-        # Field → nhóm ('veo3' | 'gemini' | 'chatgpt') để _on_type_change biết
-        # ẩn/hiện đúng widget. Lưu ý: _gemini_attach_to/_chatgpt_attach_to CÙNG
-        # label "Attach timeout" (2 QLineEdit RIÊNG, chỉ trùng text hiển thị) —
-        # form.addRow tạo 2 hàng khác nhau, _on_type_change ẩn/hiện theo widget
-        # chứ không theo label nên không nhầm lẫn.
+        f_hours.addRow(label('Giờ chạy'), self._run_hours_w)
+
+        f_misc.addRow(label('Proxy'),   self._proxy)
+        f_misc.addRow(label('Ghi chú'), self._notes)
+
+        self._tabs = QTabWidget()
+        self._tabs.setStyleSheet(f"""
+            QTabWidget::pane {{ border:none; border-top:1px solid {C['border']}; top:-1px; background:transparent; }}
+            QTabBar::tab {{ background:transparent; color:{C['muted']}; padding:8px 12px;
+                            border:none; border-bottom:2px solid transparent;
+                            font-size:12px; font-weight:600; }}
+            QTabBar::tab:selected {{ color:{C['text']}; border-bottom:2px solid {C['accent']}; }}
+            QTabBar::tab:hover:!selected {{ color:{C['text']}; }}
+            QTabWidget, QTabBar, QStackedWidget {{ background:transparent; }}
+        """)
+        self._pages = []   # [(form, host)]
+        for form_, title in ((f_acc, 'Tài khoản'), (f_task, 'Chạy task'),
+                             (f_hours, 'Giờ chạy'), (f_misc, 'Proxy & ghi chú')):
+            host = QWidget()
+            host.setStyleSheet('background:transparent;')
+            col = QVBoxLayout(host)
+            col.setContentsMargins(0, 16, 4, 0)
+            col.setSpacing(0)
+            col.addLayout(form_)
+            col.addStretch(1)
+            sc = QScrollArea()
+            sc.setWidgetResizable(True)
+            sc.setStyleSheet('QScrollArea{border:none; background:transparent;}')
+            sc.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            sc.setWidget(host)
+            sc.viewport().setAutoFillBackground(False)
+            sc.viewport().setStyleSheet('background:transparent;')
+            self._tabs.addTab(sc, title)
+            self._pages.append((form_, host))
+        self._tabs.tabBar().setUsesScrollButtons(False)
+        self._tabs.tabBar().setExpanding(False)
+        self._tabs.tabBar().setDrawBase(False)
+        self._hours_tab_index = 2
+        lay.addWidget(self._tabs, 1)
+
+        # widget → form chứa nó (để `_on_type_change` lấy đúng label qua labelForField)
+        self._field_form = {}
+        for form_, _host in self._pages:
+            for i in range(form_.rowCount()):
+                it = form_.itemAt(i, QFormLayout.ItemRole.FieldRole)
+                if it and it.widget():
+                    self._field_form[id(it.widget())] = form_
+        # Field → nhóm ('veo3' | 'gemini' | 'chatgpt'...) để _on_type_change biết
+        # ẩn/hiện đúng widget. _gemini_attach_to/_chatgpt_attach_to CÙNG label
+        # "Attach timeout" nhưng là 2 widget RIÊNG — ẩn/hiện theo widget nên không nhầm.
         self._type_fields = {
             'veo3':         [self._url, self._task_mode, self._worker_mode, self._max_concurrent,
                              self._run_hours_w],
             'gemini':       [self._gemini_attach_to, self._gemini_resp_to,
                               self._gemini_max_tabs, self._gemini_tab_interval],
             'chatgpt':      [self._chatgpt_attach_to, self._chatgpt_resp_to],
-            # gemini_video (2026-08-07) — tái dùng NGUYÊN 2 field timeout của
-            # 'gemini' (cùng ý nghĩa: chờ đính kèm ref ảnh / chờ phản hồi xong,
-            # chỉ khác thang thời gian — xem tooltip _gemini_resp_to) + field
-            # `max_concurrent` của 'veo3' (số task video/lần heartbeat, xử lý
-            # TUẦN TỰ — không cần round-robin nhiều tab như 'gemini' chat).
-            # KHÔNG cần Flow URL/Task mode/Worker mode (api/dom) — worker_mode
-            # cố định 'gemini_video', task_mode cố định 'video_only' (ép trong
-            # get_data(), không có UI chọn khác vì engine này CHỈ xử lý video).
+            # gemini_video (2026-08-07)/gemini_image (2026-09-09) — tái dùng 2
+            # field timeout của 'gemini' + `max_concurrent` của 'veo3'; không có
+            # Flow URL/Task mode/Worker mode (cố định trong get_data()).
             'gemini_video': [self._gemini_attach_to, self._gemini_resp_to, self._max_concurrent],
-            # gemini_image (2026-09-09) — MIRROR gemini_video, khác task_mode
-            # cố định 'image_only' (ép trong get_data()) vì engine này CHỈ xử
-            # lý task ẢNH. Plain Gemini chat KHÔNG có ratio selector nên không
-            # cần field nào khác ngoài 2 timeout + max_concurrent.
             'gemini_image': [self._gemini_attach_to, self._gemini_resp_to, self._max_concurrent],
         }
         self._on_type_change()
@@ -461,31 +487,36 @@ class ProfileDialog(QDialog):
                 seen.add(wid)
                 vis = wid in visible_ids
                 w.setVisible(vis)
-                lb = self._form.labelForField(w)
+                form_ = self._field_form.get(wid)
+                lb = form_.labelForField(w) if form_ else None
                 if lb:
                     lb.setVisible(vis)
+        # Tab "Giờ chạy" chỉ có ý nghĩa với VEO3.
+        self._tabs.setTabVisible(self._hours_tab_index, current == 'veo3')
         self._fit_height()
 
     def _fit_height(self):
-        """Cho dialog co/giãn theo đúng nội dung ĐANG hiện, chỉ bật thanh cuộn
-        khi vượt chiều cao màn hình.
+        """Chiều cao vùng tab = tab CAO NHẤT đang hiện (đổi tab không làm cửa sổ
+        nhảy), chỉ bật thanh cuộn khi vượt chiều cao màn hình.
 
-        Phải gọi lại sau mỗi `_on_type_change()` — đổi Loại profile ẩn/hiện
-        hàng nên chiều cao cần thiết đổi rất nhiều (VEO3 có lưới 24 ô khung giờ,
-        Gemini/ChatGPT chỉ vài ô timeout). Không gọi lại thì dialog kẹt ở chiều
-        cao của lần dựng đầu: hoặc thừa 1 mảng trống, hoặc cuộn oan."""
+        Phải gọi lại sau mỗi `_on_type_change()` — đổi Loại ẩn/hiện hàng nên chiều
+        cao cần thiết đổi (VEO3 có lưới 24 ô khung giờ, Gemini/ChatGPT chỉ vài ô)."""
         if not getattr(self, '_built', False):
             return
-        self._form.activate()                     # ép tính lại layout NGAY sau setVisible
-        need = self._form_host.sizeHint().height()
+        need = 0
+        for i, (form_, host) in enumerate(self._pages):
+            if not self._tabs.isTabVisible(i):
+                continue
+            form_.activate()                      # ép tính lại layout NGAY sau setVisible
+            need = max(need, host.sizeHint().height())
+        # + thanh tab + viền pane + khoảng dư để không bật thanh cuộn oan.
+        need += self._tabs.tabBar().sizeHint().height() + 24
 
         screen = self.screen() or QApplication.primaryScreen()
         avail = screen.availableGeometry().height() if screen else 900
-        # Chừa chỗ cho phần NGOÀI vùng cuộn (tiêu đề + 2 separator + hàng nút +
-        # lề trên/dưới) và cho khung cửa sổ của OS.
+        # Chừa chỗ cho tiêu đề + separator + hàng nút + khung cửa sổ của OS.
         cap = max(240, avail - 260)
-
-        self._scroll.setFixedHeight(min(need, cap))
+        self._tabs.setFixedHeight(min(need, cap))
         self.adjustSize()
 
     def _accept(self):
@@ -529,6 +560,7 @@ class ProfileDialog(QDialog):
             # KHÔNG .strip() — mật khẩu thật có thể (hiếm nhưng có thể) chứa
             # khoảng trắng ở đầu/cuối, trim nhầm sẽ làm sai mật khẩu thật.
             'account_password': self._password.text(),
+            'account_totp_secret': self._totp.text().replace(' ', '').strip(),
             'notes':         self._notes.text().strip(),
             'enabled':       self._enabled_chk.isChecked(),
             # Proxy áp dụng cho MỌI loại profile — đặt ở dict CHUNG (không nằm

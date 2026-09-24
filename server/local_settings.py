@@ -19,6 +19,31 @@ from .config import _DEFAULT_SERVER_SETTINGS, log
 # repo root (mỗi máy tự có bản riêng, không commit vào git — xem .gitignore).
 _LOCAL_SETTINGS_PATH = Path(__file__).parent.parent / 'local_settings.json'
 
+# Setting kiểu bật/tắt — lưu 0/1 trong JSON, GUI dùng checkbox (không gõ số).
+BOOL_KEYS = (
+    'quiet_hours_enabled', 'debug_log_curl', 'generate_via_batchexecute',
+    'gemini_send_via_rpc', 'google_login_check_enabled',
+    'bind_tasks_to_project_email', 'api_fallback_to_dom',
+)
+
+_TRUE_STR  = {'1', 'true', 'yes', 'on', 'bật', 'bat'}
+_FALSE_STR = {'0', 'false', 'no', 'off', 'tắt', 'tat', ''}
+
+
+def _to_bool01(v, default) -> int:
+    if isinstance(v, bool):
+        return 1 if v else 0
+    if isinstance(v, (int, float)):
+        return 1 if v else 0
+    if isinstance(v, str):
+        t = v.strip().lower()
+        if t in _TRUE_STR:
+            return 1
+        if t in _FALSE_STR:
+            return 0
+    return 1 if default else 0
+
+
 _lock  = threading.RLock()  # RLock — update_local_settings() gọi lại get_local_settings()
 _cache: dict | None = None
 
@@ -85,58 +110,21 @@ def _clamp(settings: dict) -> dict:
         elif not isinstance(v, list):
             s['error_patterns'] = []
 
-    # Khung giờ không nhận task (2026-07-20) — quiet_hours_enabled là int 0/1 (giữ
-    # nguyên style text-field chung của trang Cài đặt, không thêm loại input mới),
-    # quiet_hours_start/end là chuỗi "HH:MM" — validate bằng regex, sai định dạng
+    # Khung giờ không nhận task (2026-07-20) — quiet_hours_enabled xử lý chung ở
+    # BOOL_KEYS bên dưới; quiet_hours_start/end là chuỗi "HH:MM" — validate bằng regex, sai định dạng
     # thì rơi về mặc định thay vì lưu giá trị vô nghĩa khiến _is_in_quiet_hours()
     # (dispatcher.py) tính sai giờ.
-    if 'quiet_hours_enabled' in s:
-        try:
-            s['quiet_hours_enabled'] = 1 if int(s['quiet_hours_enabled']) else 0
-        except (TypeError, ValueError):
-            s['quiet_hours_enabled'] = _DEFAULT_SERVER_SETTINGS['quiet_hours_enabled']
-
     _hhmm_re = re.compile(r'^([01]\d|2[0-3]):([0-5]\d)$')
     for k in ('quiet_hours_start', 'quiet_hours_end'):
         if k in s:
             v = str(s[k]).strip()
             s[k] = v if _hhmm_re.match(v) else _DEFAULT_SERVER_SETTINGS[k]
 
-    # (2026-08-13) Bool 0/1 — cùng style text-field-chứa-"0"/"1" như
-    # quiet_hours_enabled ở trên (KHÔNG thêm loại input mới cho trang Cài đặt).
-    if 'debug_log_curl' in s:
-        try:
-            s['debug_log_curl'] = 1 if int(s['debug_log_curl']) else 0
-        except (TypeError, ValueError):
-            s['debug_log_curl'] = _DEFAULT_SERVER_SETTINGS['debug_log_curl']
-
-    # (2026-09-04) cùng style bool 0/1 như debug_log_curl ở trên.
-    if 'generate_via_batchexecute' in s:
-        try:
-            s['generate_via_batchexecute'] = 1 if int(s['generate_via_batchexecute']) else 0
-        except (TypeError, ValueError):
-            s['generate_via_batchexecute'] = _DEFAULT_SERVER_SETTINGS['generate_via_batchexecute']
-
-    # (2026-09-06) cùng style bool 0/1 như debug_log_curl ở trên.
-    if 'gemini_send_via_rpc' in s:
-        try:
-            s['gemini_send_via_rpc'] = 1 if int(s['gemini_send_via_rpc']) else 0
-        except (TypeError, ValueError):
-            s['gemini_send_via_rpc'] = _DEFAULT_SERVER_SETTINGS['gemini_send_via_rpc']
-
-    # (2026-08-17) cùng style bool 0/1 như debug_log_curl ở trên.
-    if 'google_login_check_enabled' in s:
-        try:
-            s['google_login_check_enabled'] = 1 if int(s['google_login_check_enabled']) else 0
-        except (TypeError, ValueError):
-            s['google_login_check_enabled'] = _DEFAULT_SERVER_SETTINGS['google_login_check_enabled']
-
-    # (2026-09-14) cùng style bool 0/1 như debug_log_curl ở trên.
-    if 'bind_tasks_to_project_email' in s:
-        try:
-            s['bind_tasks_to_project_email'] = 1 if int(s['bind_tasks_to_project_email']) else 0
-        except (TypeError, ValueError):
-            s['bind_tasks_to_project_email'] = _DEFAULT_SERVER_SETTINGS['bind_tasks_to_project_email']
+    # Bool — lưu dạng 0/1 (tương thích file cũ), GUI hiển thị bằng checkbox.
+    # Nhận int/bool/chuỗi ("1","0","true","false","on","off"...).
+    for k in BOOL_KEYS:
+        if k in s:
+            s[k] = _to_bool01(s[k], _DEFAULT_SERVER_SETTINGS.get(k, 0))
 
     return s
 
