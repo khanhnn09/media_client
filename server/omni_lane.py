@@ -39,7 +39,24 @@ from .run_hours import in_run_hours
 
 # Lỗi tầng tài khoản — nghỉ lâu hơn thay vì đốt task liên tục.
 _ACCOUNT_BLOCK_HINTS = ('UNUSUAL_ACTIVITY', 'RESOURCE_EXHAUSTED', 'QUOTA', 'PERMISSION_DENIED',
-                        'NO_SAPISID_COOKIE', 'HTTP 401', 'HTTP 403')
+                        'NO_SAPISID_COOKIE', 'HTTP 403')
+
+# (2026-09-28) Proxy XOAY đổi IP giữa chừng → kết nối đang mở bị đứt (generate
+# chờ ~30-60s nên rất dễ dính). Lỗi kiểu này là TẠM THỜI: chờ proxy ổn định, nạp
+# lại trang Vids rồi làm lại ngay trong làn, không báo lỗi task về server.
+_TRANSIENT_HINTS = ('Failed to fetch', 'NetworkError', 'fetch error', 'ERR_', 'network',
+                    'Load failed', 'HTTP 0', 'HTTP 401', 'HTTP 502', 'HTTP 503', 'HTTP 504',
+                    'HTTP 500', 'không phản hồi', 'Connection', 'timed out', 'Timeout')
+_MAX_TASK_RETRIES = 3          # số lần làm lại 1 task khi gặp lỗi mạng tạm thời
+_RETRY_WAIT_SECS = 10          # chờ proxy xoay xong IP mới trước khi làm lại
+_STEP_RETRIES = 3              # thử lại từng bước nhỏ (upload 1 ảnh, tải mp4, gửi kết quả)
+
+
+def _is_transient(msg: str) -> bool:
+    m = str(msg or '')
+    if any(h in m for h in _ACCOUNT_BLOCK_HINTS):
+        return False
+    return any(h.lower() in m.lower() for h in _TRANSIENT_HINTS)
 _ACCOUNT_BACKOFF_SECS = 600
 _GENERATE_TIMEOUT_SECS = omni_be.GENERATE_TIMEOUT_SECS + 15   # JS tự huỷ fetch trước mốc này
 _PAGE_MAX_AGE_SECS = 1800     # nạp lại trang Vids định kỳ (token docs-est có hạn)
@@ -352,52 +369,87 @@ class OmniLane:
             for t in tasks:        # đã nhận từ heartbeat — phải trả lại để server giao lại
                 self._fail(t, e)
             return
-        pending = {}                     # key -> task
+        pending = {}                     # key -> (task, t0, lần_thử)
+        self._st = st
         for t in tasks:
             if self._stopped():
                 self._report_error(t['id'], 'Worker dừng trước khi chạy task')
                 continue
-            try:
-                key = self._kickoff(t, st)
-                pending[key] = (t, time.time())
-            except Exception as e:
-                self._fail(t, e)
+            self._start_task(t, pending, attempt=0, first=True)
         last_ka = time.time()
         while pending and not self._stopped():
             time.sleep(3)
             for key in list(pending):
-                t, t0 = pending[key]
+                t, t0, attempt = pending[key]
                 try:
                     g = self.tab.evaluate(omni_be.call_expr('poll', key), timeout=30) or {}
                 except CdpError as e:
                     pending.pop(key)
-                    self._fail(t, e)
+                    self._retry_or_fail(t, e, pending, attempt)
                     continue
                 if g.get('state') == 'running':
                     if time.time() - t0 > _GENERATE_TIMEOUT_SECS:
                         pending.pop(key)
-                        self._fail(t, f'quá {_GENERATE_TIMEOUT_SECS}s chưa có kết quả')
+                        self._retry_or_fail(t, f'Timeout: quá {_GENERATE_TIMEOUT_SECS}s chưa có kết quả',
+                                            pending, attempt)
                     continue
                 pending.pop(key)
                 if g.get('state') == 'missing':
-                    self._fail(t, 'mất kết quả generate (trang Vids vừa tải lại?)')
+                    # Trang Vids vừa tải lại (vd sau khi proxy đổi IP) — kết quả cũ mất.
+                    self._retry_or_fail(t, 'fetch error: mất kết quả generate (trang Vids vừa tải lại)',
+                                        pending, attempt)
                     continue
                 try:
                     self._finish(t, g, time.time() - t0)
                 except Exception as e:
-                    self._fail(t, e)
+                    self._retry_or_fail(t, e, pending, attempt)
             if time.time() - last_ka >= POLL_INTERVAL:
                 self._heartbeat(running=len(pending), keepalive_only=True)
                 last_ka = time.time()
-        for key, (t, _) in pending.items():
+        for key, (t, _t0, _a) in pending.items():
             self._report_error(t['id'], 'Worker dừng giữa lúc tạo video')
 
-    def _kickoff(self, task: dict, st: dict) -> str:
+    def _start_task(self, t: dict, pending: dict, attempt: int, first: bool = False):
+        try:
+            key = self._kickoff(t, self._st, first=first)
+            pending[key] = (t, time.time(), attempt)
+        except Exception as e:
+            self._retry_or_fail(t, e, pending, attempt)
+
+    def _retry_or_fail(self, t: dict, err, pending: dict, attempt: int):
+        """Lỗi mạng tạm thời (proxy xoay đổi IP…) → chờ, nạp lại trang, làm lại task
+        NGAY trong làn (tối đa `_MAX_TASK_RETRIES` lần). Lỗi khác → báo lỗi về server."""
+        msg = str(err)
+        if attempt >= _MAX_TASK_RETRIES or not _is_transient(msg) or self._stopped():
+            self._fail(t, msg if attempt == 0 else f'{msg} (sau {attempt} lần làm lại)')
+            return
+        self._log('warn', f'↻ Task #{t["id"]}: lỗi mạng tạm thời ({msg[:120]}) — '
+                          f'chờ {_RETRY_WAIT_SECS}s (proxy đổi IP?) rồi làm lại '
+                          f'{attempt + 1}/{_MAX_TASK_RETRIES}')
+        self._halt.wait(_RETRY_WAIT_SECS)
+        # Nạp lại trang sẽ làm MẤT kết quả các task khác đang tạo trong cùng tab —
+        # chỉ nạp khi tab rảnh, hoặc khi lỗi đòi phải có trang mới (401/trang đã mất).
+        if not pending or 'HTTP 401' in msg or 'mất kết quả' in msg:
+            self._refresh_page()
+        self._start_task(t, pending, attempt + 1)
+
+    def _refresh_page(self):
+        """Nạp lại tab Vids + đọc lại token. Sau khi đổi IP, request cũ trong trang
+        đã chết; nạp lại để có trang/kết nối mới sạch."""
+        try:
+            self.tab.navigate(self.doc_url or omni_be.VIDS_HOME_URL, wait=40)
+            self._page_loaded_at = time.time()
+            self._st = self._state()
+        except Exception as e:
+            self._log('warn', f'Nạp lại tab Vids lỗi: {e}')
+
+    def _kickoff(self, task: dict, st: dict, first: bool = True) -> str:
         task_id = task['id']
         prompt = (task.get('prompt_text') or task.get('title') or '').strip()
-        self._log('info', f'▶ Task #{task_id} mode={task.get("mode")} "{prompt[:70]}"')
-        self.w._req('POST', f'{FLOW_SERVER}/api/media/task/processing',
-                    body={'taskId': task_id, 'machineCode': self.machine_code})
+        if first:
+            self._log('info', f'▶ Task #{task_id} mode={task.get("mode")} "{prompt[:70]}"')
+            self.w._req('POST', f'{FLOW_SERVER}/api/media/task/processing',
+                        body={'taskId': task_id, 'machineCode': self.machine_code})
 
         urls = self._source_urls(task)
         if len(urls) > omni_be.MAX_INGREDIENTS:
@@ -408,10 +460,9 @@ class OmniLane:
         for i, u in enumerate(urls):
             r = req_lib.get(u, timeout=60)
             r.raise_for_status()
-            up = self.tab.evaluate(omni_be.call_expr('upload', base64.b64encode(r.content).decode()),
-                                   timeout=120) or {}
-            if not up.get('blobId'):
-                raise RuntimeError(f'upload ảnh {i + 1} lỗi: {up.get("error") or up}')
+            b64 = base64.b64encode(r.content).decode()
+            up = self._step(f'upload ảnh {i + 1}', lambda: self.tab.evaluate(
+                omni_be.call_expr('upload', b64), timeout=120) or {}, ok=lambda x: x.get('blobId'))
             ings.append((omni_be.new_ingredient_uuid(), up['blobId'], omni_be.label_for(i)))
         if ings:
             self._log('info', f'Task #{task_id}: đã upload {len(ings)} ảnh thành phần')
@@ -436,17 +487,34 @@ class OmniLane:
         urls = omni_be.parse_generate_response(text)
         if g.get('status') != 200 or not urls:
             raise RuntimeError(omni_be.summarize_error(g.get('status') or 0, text))
-        r = self.tab.evaluate(omni_be.call_expr('fetchB64', urls[0]), timeout=180) or {}
-        if not r.get('b64'):
-            raise RuntimeError(f'tải video lỗi: {r.get("error") or r}')
+        r = self._step('tải video', lambda: self.tab.evaluate(
+            omni_be.call_expr('fetchB64', urls[0]), timeout=180) or {}, ok=lambda x: x.get('b64'))
         data = base64.b64decode(r['b64'])
-        self.w._upload_video_result(task_id, data)
+        self._step('gửi kết quả về server', lambda: self.w._upload_video_result(task_id, data) or True)
         self.done_count += 1
         try:
             pm.bump_task_stat(self.profile_id, 'done')
         except Exception:
             pass
         self._log('ok', f'✔ Task #{task_id} xong ({elapsed:.0f}s, {len(data) // 1024}KB)')
+
+    def _step(self, name: str, fn, ok=bool):
+        """Chạy 1 bước nhỏ, lỗi mạng tạm thời thì thử lại tại chỗ (không làm lại
+        cả task). Hết lượt thử → raise để `_retry_or_fail()` quyết định."""
+        last = None
+        for i in range(_STEP_RETRIES):
+            try:
+                res = fn()
+                if ok(res):
+                    return res
+                last = (res or {}).get('error') if isinstance(res, dict) else res
+            except Exception as e:
+                last = e
+            if not _is_transient(str(last)) or i == _STEP_RETRIES - 1:
+                break
+            self._log('warn', f'{name} lỗi ({str(last)[:100]}) — thử lại {i + 2}/{_STEP_RETRIES}')
+            self._halt.wait(5)
+        raise RuntimeError(f'{name} lỗi: {last}')
 
     def _fail(self, task: dict, err):
         msg = str(err)
