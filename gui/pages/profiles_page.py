@@ -312,6 +312,8 @@ class ProfilesPage(QWidget):
                 text, color = _TASK_MODE_ENGINE_BADGE.get(task_mode, _TASK_MODE_ENGINE_BADGE['all'])
                 engine_badge = Badge(text, color)
                 sub_parts = [f'{worker_mode.upper()} mode', f'x{max_conc}']
+                if int(p.get('omni_enabled') or 0):
+                    sub_parts.append('+ Omni')
                 # (2026-09-17) Khung giờ chạy riêng — rỗng = chạy liên tục, không hiện.
                 hours_span = summarize_run_hours(p.get('run_hours'))
                 if hours_span:

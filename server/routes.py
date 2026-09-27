@@ -67,6 +67,7 @@ def create_profile():
             gemini_tab_switch_interval  = d.get('gemini_tab_switch_interval', 0.5),
             proxy_server                = d.get('proxy_server', ''),
             run_hours                   = d.get('run_hours', ''),
+            omni_enabled                = d.get('omni_enabled', 0),
         )
         return jsonify({'id': new_id, 'ok': True})
     except Exception as e:

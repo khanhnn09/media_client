@@ -24,6 +24,7 @@ from . import gemini_be
 from . import model_catalog
 from . import flow_models
 from .run_hours import in_run_hours, summarize_run_hours
+from .omni_lane import OmniLane, omni_enabled_for
 from .chrome_utils import (
     _chrome_alive_on_port, _chrome_running_for_profile, _kill_chrome_for_profile,
     _build_chrome_options, _chrome_debug_port, _connect_to_chrome,
@@ -404,6 +405,9 @@ class SeleniumFlowWorker:
         self.profile     = profile
         self.profile_id  = profile['id']
         self.machine_code = f'selenium-{profile["id"]}'
+        # (2026-09-27) Làn Omni On Workspace chạy kèm VEO — xem server/omni_lane.py
+        self._omni = None
+        self._omni_relogin_at = 0.0
         self.worker_mode = profile.get('worker_mode') or 'api'
         if self.worker_mode not in ('api', 'dom', 'gemini', 'chatgpt', 'gemini_video', 'gemini_image'):
             self.worker_mode = 'api'
@@ -8748,6 +8752,13 @@ class SeleniumFlowWorker:
                 else:
                     self._log('ok', 'DOM mode — sẵn sàng nhận task (không cần token)')
 
+                # (2026-09-27) Kết hợp chạy Omni: mở thêm 1 tab Google Vids, làn
+                # riêng chỉ nhận task VIDEO — chạy song song tab VEO này.
+                if omni_enabled_for(self.profile):
+                    lane = OmniLane(self)
+                    if lane.start():
+                        self._omni = lane
+
             while not self._stop.is_set():
                 # Kiểm tra browser còn sống TRƯỚC KHI heartbeat
                 # Nếu user đóng Chrome thủ công → thoát ngay, không nhận task
@@ -8756,6 +8767,13 @@ class SeleniumFlowWorker:
                     break
 
                 self._drain_browser_logs()
+
+                # Làn Omni mất đăng nhập Google — đăng nhập lại bằng Selenium ở
+                # luồng chính (giữa 2 lượt VEO), tối đa 1 lần / 5 phút.
+                if (self._omni and self._omni.need_relogin
+                        and time.time() - self._omni_relogin_at > 300):
+                    self._omni_relogin_at = time.time()
+                    self._omni.relogin_from_main_thread()
 
                 try:
                     tasks = self._heartbeat()
@@ -8788,6 +8806,8 @@ class SeleniumFlowWorker:
         except Exception as e:
             self._log('error', f'Worker fatal: {e}')
         finally:
+            if self._omni:
+                self._omni.stop()
             if self.driver:
                 try:
                     self.driver.quit()

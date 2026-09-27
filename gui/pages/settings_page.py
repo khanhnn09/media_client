@@ -52,6 +52,9 @@ _TABS = [
          'Mặc định tắt — profile API CHỈ chạy API, task lỗi báo về server. Bật = task lỗi API '
          '(hoặc không gọi được API) chạy lại ngay bằng DOM. Video đã gửi API thành công '
          'không chuyển DOM (tránh tạo trùng).'),
+        ('omni_max_concurrent',            'Omni: số task video đồng thời', 'int',
+         'Làn Omni (Google Vids) chạy kèm profile VEO bật "Kết hợp chạy Omni" — số task video '
+         'bắn cùng lúc trong tab Vids (1-5). Omni nhận tối đa 3 ảnh thành phần/task.'),
         ('gemini_send_via_rpc',            'Gemini: gửi ẩn qua RPC', 'bool',
          'Không gõ prompt vào ô nhập liệu. Có file đính kèm luôn dùng DOM.'),
         ('task_delay_secs',                'Delay giữa các task (giây)', 'int',

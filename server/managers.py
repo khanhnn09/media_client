@@ -420,22 +420,52 @@ def _purge_all_site_data(profile_dir: str) -> dict:
 # Profile Manager
 # ═════════════════════════════════════════════════════════════════════════════
 
+# (2026-09-27) Cờ `omni_enabled` — lưu ở backend (cột selenium_profiles.omni_enabled)
+# VÀ 1 bản cục bộ dự phòng: backend chưa deploy migration thì PATCH bỏ qua field
+# này im lặng, bản cục bộ giữ cho tính năng vẫn chạy trên máy này.
+_LOCAL_FLAGS_FILE = Path(__file__).resolve().parent.parent / 'local_profile_flags.json'
+
+
+def _local_flags() -> dict:
+    try:
+        import json as _json
+        return _json.loads(_LOCAL_FLAGS_FILE.read_text(encoding='utf-8'))
+    except Exception:
+        return {}
+
+
+def _set_local_flag(profile_id, key: str, value):
+    import json as _json
+    d = _local_flags()
+    d.setdefault(str(profile_id), {})[key] = value
+    tmp = _LOCAL_FLAGS_FILE.with_suffix('.tmp')
+    tmp.write_text(_json.dumps(d, ensure_ascii=False, indent=1), encoding='utf-8')
+    os.replace(tmp, _LOCAL_FLAGS_FILE)
+
+
+def _merge_local_flags(row):
+    """Backend chưa có cột → điền từ bản cục bộ."""
+    if row and 'omni_enabled' not in row:
+        row['omni_enabled'] = int((_local_flags().get(str(row.get('id'))) or {}).get('omni_enabled') or 0)
+    return row
+
+
 class _ProfileManager:
 
     def list(self) -> list:
         r = _api('GET', '/api/worker_profiles')
-        return r.get('profiles', [])
+        return [_merge_local_flags(p) for p in r.get('profiles', [])]
 
     def get(self, profile_id: int):
         r = _api('GET', f'/api/worker_profiles/{profile_id}', quiet=True)
-        return (r or {}).get('profile')
+        return _merge_local_flags((r or {}).get('profile'))
 
     def create(self, name: str, email='', password='', display_name='', project_url='', task_mode='all',
                worker_mode='api', notes='', gemini_attach_timeout=180,
                gemini_response_timeout=300, max_concurrent=1, enabled=1,
                gemini_max_concurrent_tabs=1, gemini_tab_switch_interval=0.5,
                chatgpt_attach_timeout=60, chatgpt_response_timeout=300,
-               proxy_server='', run_hours='', totp_secret='') -> int:
+               proxy_server='', run_hours='', totp_secret='', omni_enabled=0) -> int:
         profile_dir = str(Path(PROFILES_DIR) / name)
         os.makedirs(profile_dir, exist_ok=True)  # cục bộ — user-data-dir chỉ có ý nghĩa trên máy này
         # (2026-08-07) 'gemini_video' — BUG THẬT đã sót ở đây từ lúc thêm loại
@@ -459,6 +489,7 @@ class _ProfileManager:
             'account_totp_secret': (totp_secret or '').strip(),
             'proxy_server': (proxy_server or '').strip(),
             'run_hours': format_run_hours(run_hours),
+            'omni_enabled': 1 if omni_enabled and worker_mode in ('api', 'dom') else 0,
             'project_url': project_url, 'task_mode': task_mode,
             'worker_mode': worker_mode, 'notes': notes,
             'gemini_attach_timeout': gemini_attach_timeout,
@@ -469,18 +500,26 @@ class _ProfileManager:
             'chatgpt_attach_timeout': chatgpt_attach_timeout,
             'chatgpt_response_timeout': chatgpt_response_timeout,
         })
-        return r.get('id', 0)
+        new_id = r.get('id', 0)
+        if new_id:
+            _set_local_flag(new_id, 'omni_enabled',
+                            1 if omni_enabled and worker_mode in ('api', 'dom') else 0)
+        return new_id
 
     def update(self, profile_id: int, **fields):
         allowed = {'profile_name', 'display_name', 'account_email', 'account_password', 'account_totp_secret',
                    'project_url',
                    'task_mode', 'worker_mode', 'notes', 'enabled', 'proxy_server', 'run_hours',
+                   'omni_enabled',
                    'gemini_attach_timeout', 'gemini_response_timeout', 'max_concurrent',
                    'gemini_max_concurrent_tabs', 'gemini_tab_switch_interval',
                    'chatgpt_attach_timeout', 'chatgpt_response_timeout'}
         sets = {k: v for k, v in fields.items() if k in allowed}
         if 'run_hours' in sets:
             sets['run_hours'] = format_run_hours(sets['run_hours'])
+        if 'omni_enabled' in sets:
+            sets['omni_enabled'] = 1 if sets['omni_enabled'] else 0
+            _set_local_flag(profile_id, 'omni_enabled', sets['omni_enabled'])
         if not sets:
             return
         _api('PATCH', f'/api/worker_profiles/{profile_id}', body=sets)

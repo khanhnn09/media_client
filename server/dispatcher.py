@@ -283,6 +283,11 @@ def _profile_veo3_eligible(profile: dict, pending: dict) -> bool:
     # đúng backlog đó, không phải backlog chung (vốn đã loại project đã gán).
     if worker_mode in ('api', 'dom') and _bind_enabled():
         pending = _email_backlog(profile, pending)
+    # (2026-09-27) Profile VEO bật "Kết hợp chạy Omni" — làn Omni nhận task video
+    # bất kể task_mode của làn VEO, nên có backlog video là đủ lý do mở profile.
+    if (worker_mode in ('api', 'dom') and int(profile.get('omni_enabled') or 0)
+            and (pending.get('videoTotal') or 0) > 0):
+        return True
     if task_mode == 'image_only':
         return (pending.get('imageTotal') or 0) > 0
     if task_mode == 'video_only':
@@ -333,10 +338,18 @@ def _run_hours_gate(profile: dict) -> bool:
     _desired_veo3.discard(pid)
     if pid in _workers:
         w, _t = _workers[pid]
-        if w._current_task is None:
+        if not _worker_busy(w):
             log.info(f'[run-hours] Profile {pid} ngoài khung giờ chạy — tự đóng')
             _stop_worker(pid)
     return False
+
+
+def _worker_busy(w) -> bool:
+    """Worker còn việc dở: task VEO đang chạy HOẶC làn Omni đang tạo video."""
+    if w._current_task is not None:
+        return True
+    lane = getattr(w, '_omni', None)
+    return bool(lane and lane.busy)
 
 
 def _auto_scale_veo3_tick():
@@ -374,7 +387,7 @@ def _auto_scale_veo3_tick():
             _desired_veo3.discard(pid)
             if pid in _workers:
                 w, _t = _workers[pid]
-                if w._current_task is None:
+                if not _worker_busy(w):
                     log.info(f'[auto-scale] Profile {pid} vừa bị tắt (enabled=0) — tự đóng')
                     _stop_worker(pid)
             continue
@@ -409,7 +422,7 @@ def _auto_scale_veo3_tick():
         if pid not in _workers:
             continue
         w, _t = _workers[pid]
-        if w._current_task is not None:
+        if _worker_busy(w):
             continue
         log.info(f'[auto-scale] Profile {pid} hết task khớp task_mode "{profile.get("task_mode")}" — tự đóng')
         _stop_worker(pid)

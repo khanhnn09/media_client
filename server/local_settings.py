@@ -68,6 +68,12 @@ def _clamp(settings: dict) -> dict:
                 s[k] = _DEFAULT_SERVER_SETTINGS.get(k, 1)
 
 
+    if 'omni_max_concurrent' in s:
+        try:
+            s['omni_max_concurrent'] = max(1, min(int(s['omni_max_concurrent']), 5))
+        except (TypeError, ValueError):
+            s['omni_max_concurrent'] = 1
+
     if 'max_concurrent_veo3_profiles' in s:
         try:
             s['max_concurrent_veo3_profiles'] = max(1, min(int(s['max_concurrent_veo3_profiles']), 50))

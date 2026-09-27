@@ -25,3 +25,9 @@ docs/
 __pycache__
 *.pyc
 .pytest_cache
+
+omni_docs.json
+omni_docs.tmp
+tests/_omni_capture/
+local_profile_flags.json
+local_profile_flags.tmp
