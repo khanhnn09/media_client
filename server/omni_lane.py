@@ -160,8 +160,7 @@ class OmniLane:
         if not ok:
             self._log('error', 'Đăng nhập Google cho tab Vids thất bại — làn Omni sẽ chờ đăng nhập lại')
             self.need_relogin = True
-        from .chrome_utils import _chrome_debug_port
-        port = _chrome_debug_port(self.profile_id)
+        port = self._real_debug_port()
         self.tab = CdpTab(port, self.handle)
         try:
             self.tab.connect()
@@ -174,6 +173,23 @@ class OmniLane:
         self._thread.start()
         self._log('ok', f'Tab Vids sẵn sàng — làn Omni nhận task VIDEO ({self.machine_code})')
         return True
+
+    def _real_debug_port(self) -> int:
+        """Cổng DevTools THẬT của Chrome đang chạy. ⚠️ KHÔNG tự tính `9300 + id`:
+        `undetected_chromedriver` tự chọn cổng ngẫu nhiên, bỏ qua
+        `--remote-debugging-port` mình đặt (lỗi thật: "port 9318 … actively
+        refused"). chromedriver luôn ghi cổng thật vào capability
+        `goog:chromeOptions.debuggerAddress` — đọc từ đó, không có mới dùng công thức."""
+        try:
+            caps = self.w.driver.capabilities or {}
+            for key in ('goog:chromeOptions', 'ms:edgeOptions'):
+                addr = (caps.get(key) or {}).get('debuggerAddress') or ''
+                if ':' in addr:
+                    return int(addr.rsplit(':', 1)[1])
+        except Exception:
+            pass
+        from .chrome_utils import _chrome_debug_port
+        return _chrome_debug_port(self.profile_id)
 
     def relogin_from_main_thread(self):
         """Worker gọi ở luồng chính khi `need_relogin` — dùng Selenium đăng nhập lại
