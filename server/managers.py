@@ -445,8 +445,14 @@ def _set_local_flag(profile_id, key: str, value):
 
 def _merge_local_flags(row):
     """Backend chưa có cột → điền từ bản cục bộ."""
-    if row and 'omni_enabled' not in row:
-        row['omni_enabled'] = int((_local_flags().get(str(row.get('id'))) or {}).get('omni_enabled') or 0)
+    if row:
+        loc = _local_flags().get(str(row.get('id'))) or {}
+        if 'omni_enabled' not in row:
+            row['omni_enabled'] = int(loc.get('omni_enabled') or 0)
+        # (2026-09-28) `veo_enabled` — mặc định 1 (chạy VEO như cũ).
+        if row.get('veo_enabled') is None:
+            v = loc.get('veo_enabled')
+            row['veo_enabled'] = 1 if v is None else int(v)
     return row
 
 
@@ -465,7 +471,8 @@ class _ProfileManager:
                gemini_response_timeout=300, max_concurrent=1, enabled=1,
                gemini_max_concurrent_tabs=1, gemini_tab_switch_interval=0.5,
                chatgpt_attach_timeout=60, chatgpt_response_timeout=300,
-               proxy_server='', run_hours='', totp_secret='', omni_enabled=0) -> int:
+               proxy_server='', run_hours='', totp_secret='', omni_enabled=0,
+               veo_enabled=1) -> int:
         profile_dir = str(Path(PROFILES_DIR) / name)
         os.makedirs(profile_dir, exist_ok=True)  # cục bộ — user-data-dir chỉ có ý nghĩa trên máy này
         # (2026-08-07) 'gemini_video' — BUG THẬT đã sót ở đây từ lúc thêm loại
@@ -490,6 +497,7 @@ class _ProfileManager:
             'proxy_server': (proxy_server or '').strip(),
             'run_hours': format_run_hours(run_hours),
             'omni_enabled': 1 if omni_enabled and worker_mode in ('api', 'dom') else 0,
+            'veo_enabled': 0 if (not veo_enabled and omni_enabled and worker_mode in ('api', 'dom')) else 1,
             'project_url': project_url, 'task_mode': task_mode,
             'worker_mode': worker_mode, 'notes': notes,
             'gemini_attach_timeout': gemini_attach_timeout,
@@ -504,13 +512,15 @@ class _ProfileManager:
         if new_id:
             _set_local_flag(new_id, 'omni_enabled',
                             1 if omni_enabled and worker_mode in ('api', 'dom') else 0)
+            _set_local_flag(new_id, 'veo_enabled',
+                            0 if (not veo_enabled and omni_enabled and worker_mode in ('api', 'dom')) else 1)
         return new_id
 
     def update(self, profile_id: int, **fields):
         allowed = {'profile_name', 'display_name', 'account_email', 'account_password', 'account_totp_secret',
                    'project_url',
                    'task_mode', 'worker_mode', 'notes', 'enabled', 'proxy_server', 'run_hours',
-                   'omni_enabled',
+                   'omni_enabled', 'veo_enabled',
                    'gemini_attach_timeout', 'gemini_response_timeout', 'max_concurrent',
                    'gemini_max_concurrent_tabs', 'gemini_tab_switch_interval',
                    'chatgpt_attach_timeout', 'chatgpt_response_timeout'}
@@ -520,6 +530,9 @@ class _ProfileManager:
         if 'omni_enabled' in sets:
             sets['omni_enabled'] = 1 if sets['omni_enabled'] else 0
             _set_local_flag(profile_id, 'omni_enabled', sets['omni_enabled'])
+        if 'veo_enabled' in sets:
+            sets['veo_enabled'] = 1 if sets['veo_enabled'] else 0
+            _set_local_flag(profile_id, 'veo_enabled', sets['veo_enabled'])
         if not sets:
             return
         _api('PATCH', f'/api/worker_profiles/{profile_id}', body=sets)

@@ -9,6 +9,7 @@ from .managers import pm
 from .worker import SeleniumFlowWorker
 from .local_settings import get_local_settings
 from .run_hours import in_run_hours, summarize_run_hours
+from .omni_lane import veo_enabled_for as _veo_on
 from .state import (
     _workers, _desired_veo3, _sleep_until_by_pid, _master_switch_snapshot,
     _pending_cache, _PENDING_CACHE_TTL, _pending_fail_streak, _PENDING_MAX_STALE_FAILS,
@@ -288,6 +289,9 @@ def _profile_veo3_eligible(profile: dict, pending: dict) -> bool:
     if (worker_mode in ('api', 'dom') and int(profile.get('omni_enabled') or 0)
             and (pending.get('videoTotal') or 0) > 0):
         return True
+    # (2026-09-28) Profile tắt VEO chỉ chạy Omni → chỉ backlog video mới là lý do mở.
+    if worker_mode in ('api', 'dom') and not _veo_on(profile):
+        return False
     if task_mode == 'image_only':
         return (pending.get('imageTotal') or 0) > 0
     if task_mode == 'video_only':
@@ -537,7 +541,9 @@ def _veo3_dispatcher_tick():
             continue
         wm = running_profile.get('worker_mode')
         tm = running_profile.get('task_mode') or 'all'
-        if bind and wm in ('api', 'dom'):
+        if wm in ('api', 'dom') and not _veo_on(running_profile):
+            tm = 'video_only'          # chỉ Omni → chỉ ăn task video
+        elif bind and wm in ('api', 'dom'):
             _eb_take(running_profile)
             continue
         if wm == 'gemini_image':
@@ -568,7 +574,9 @@ def _veo3_dispatcher_tick():
             continue
         wm = profile.get('worker_mode')
         tm = profile.get('task_mode') or 'all'
-        if bind and wm in ('api', 'dom'):
+        if wm in ('api', 'dom') and not _veo_on(profile):
+            vid_wait.append(profile)   # chỉ Omni → cạnh tranh ngân sách video
+        elif bind and wm in ('api', 'dom'):
             bound_wait.append(profile)
         elif wm == 'gemini_image':
             gemini_img_wait.append(profile)

@@ -24,7 +24,7 @@ from . import gemini_be
 from . import model_catalog
 from . import flow_models
 from .run_hours import in_run_hours, summarize_run_hours
-from .omni_lane import OmniLane, omni_enabled_for
+from .omni_lane import OmniLane, omni_enabled_for, veo_enabled_for
 from .chrome_utils import (
     _chrome_alive_on_port, _chrome_running_for_profile, _kill_chrome_for_profile,
     _build_chrome_options, _chrome_debug_port, _connect_to_chrome,
@@ -8743,6 +8743,16 @@ class SeleniumFlowWorker:
                     self._log('error', 'Đăng nhập Google thất bại/chưa cấu hình — worker vẫn '
                                         'chạy nhưng MỌI task sẽ lỗi tới khi khắc phục (xem log '
                                         '[google-login] ở trên).')
+            elif not veo_enabled_for(self.profile):
+                # (2026-09-28) Profile tắt VEO, chỉ chạy Omni — không vào Flow,
+                # không nhận task VEO; vòng lặp chính chỉ canh làn Omni.
+                self._log('info', 'Chrome opened — profile CHỈ chạy Omni (tắt VEO)')
+                lane = OmniLane(self)
+                if lane.start():
+                    self._omni = lane
+                else:
+                    self._log('error', 'Làn Omni không khởi động được mà VEO đang tắt — thoát worker')
+                    return
             else:
                 self._log('info', 'Chrome opened — navigate to Flow page')
                 self._ensure_flow_page()
@@ -8774,6 +8784,14 @@ class SeleniumFlowWorker:
                         and time.time() - self._omni_relogin_at > 300):
                     self._omni_relogin_at = time.time()
                     self._omni.relogin_from_main_thread()
+
+                if self._omni and not veo_enabled_for(self.profile):
+                    # Chỉ chạy Omni: không heartbeat làn VEO, chỉ giữ Chrome + canh làn.
+                    if not self._omni.running:
+                        self._log('warn', 'Làn Omni đã dừng — thoát worker loop')
+                        break
+                    self._stop.wait(POLL_INTERVAL)
+                    continue
 
                 try:
                     tasks = self._heartbeat()

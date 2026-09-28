@@ -198,11 +198,25 @@ class ProfileDialog(QDialog):
         # — Kết hợp chạy Omni (2026-09-27, chỉ VEO3) — mở thêm 1 tab Google Vids,
         # làn riêng CHỈ nhận task video (xem server/omni_lane.py). Nhãn NGẮN (xem
         # cảnh báo QCheckBox ở `_enabled_chk`), chi tiết để tooltip.
-        self._omni_chk = QCheckBox('Kết hợp chạy Omni')
+        # (2026-09-28) 2 checkbox engine: "VEO" (tab Flow) + "Omni" (tab Vids).
+        # Bỏ tick VEO mà vẫn tick Omni → profile chỉ chạy Omni (task video).
+        self._veo_chk = QCheckBox('VEO')
+        self._veo_chk.setToolTip('Tab Flow nhận task ảnh/video theo Task mode.\n'
+                                 'Bỏ tick = không chạy VEO, chỉ chạy Omni (nếu tick Omni).')
+        _v = (self._p or {}).get('veo_enabled')
+        self._veo_chk.setChecked(True if _v is None else bool(int(_v)))
+        self._omni_chk = QCheckBox('Omni')
         self._omni_chk.setToolTip('Mở thêm 1 tab Google Vids (docs.google.com/videos) chạy song song:\n'
                                   '1 bên VEO, 1 bên Omni — Omni CHỈ nhận task video.\n'
                                   'Omni nhận tối đa 3 ảnh thành phần; tỉ lệ ngang/dọc; 3-10 giây.')
         self._omni_chk.setChecked(bool(int((self._p or {}).get('omni_enabled') or 0)))
+        self._engines_w = QWidget()
+        _eng = QHBoxLayout(self._engines_w)
+        _eng.setContentsMargins(0, 0, 0, 0)
+        _eng.addWidget(self._veo_chk)
+        _eng.addSpacing(16)
+        _eng.addWidget(self._omni_chk)
+        _eng.addStretch(1)
 
         # — Khung giờ chạy (2026-09-17, chỉ VEO3) — 24 ô 0..23, ô `h` = nhận task
         # trong khoảng h:00-h:59 theo giờ máy này. Không tick ô nào = chạy liên tục.
@@ -355,7 +369,7 @@ class ProfileDialog(QDialog):
         f_task.addRow(label('Task mode'),        self._task_mode)
         f_task.addRow(label('Worker mode'),      self._worker_mode)
         f_task.addRow(label('Task nhận đồng thời'), self._max_concurrent)
-        f_task.addRow(label('Omni'),             self._omni_chk)
+        f_task.addRow(label('Engine chạy'),      self._engines_w)
         f_task.addRow(label('Attach timeout'),   self._gemini_attach_to)
         f_task.addRow(label('Response timeout'), self._gemini_resp_to)
         f_task.addRow(label('Số tab đồng thời'), self._gemini_max_tabs)
@@ -415,7 +429,7 @@ class ProfileDialog(QDialog):
         # "Attach timeout" nhưng là 2 widget RIÊNG — ẩn/hiện theo widget nên không nhầm.
         self._type_fields = {
             'veo3':         [self._url, self._task_mode, self._worker_mode, self._max_concurrent,
-                             self._omni_chk, self._run_hours_w],
+                             self._engines_w, self._run_hours_w],
             'gemini':       [self._gemini_attach_to, self._gemini_resp_to,
                               self._gemini_max_tabs, self._gemini_tab_interval],
             'chatgpt':      [self._chatgpt_attach_to, self._chatgpt_resp_to],
@@ -547,6 +561,9 @@ class ProfileDialog(QDialog):
                 except ValueError:
                     QMessageBox.warning(self, 'Giá trị không hợp lệ', 'Giãn cách chuyển tab phải là số (giây).')
                     return
+        elif current == 'veo3' and not self._veo_chk.isChecked() and not self._omni_chk.isChecked():
+            QMessageBox.warning(self, 'Thiếu engine', 'Phải tick ít nhất 1 trong 2: VEO hoặc Omni.')
+            return
         elif current == 'chatgpt':
             for e, lbl_txt in ((self._chatgpt_attach_to, 'Attach timeout'),
                                (self._chatgpt_resp_to, 'Response timeout')):
@@ -612,9 +629,11 @@ class ProfileDialog(QDialog):
             data['max_concurrent'] = self._max_concurrent.value()
             data['run_hours']      = ','.join(str(h) for h in self._checked_hours())
             data['omni_enabled']   = 1 if self._omni_chk.isChecked() else 0
+            data['veo_enabled']    = 1 if self._veo_chk.isChecked() else 0
         if current != 'veo3':
             data['run_hours'] = ''   # khung giờ chạy chỉ áp dụng VEO3
             data['omni_enabled'] = 0 # Omni chỉ chạy kèm VEO3
+            data['veo_enabled'] = 1
         return data
 
 

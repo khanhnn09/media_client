@@ -138,6 +138,17 @@ def omni_enabled_for(profile: dict) -> bool:
         return False
 
 
+def veo_enabled_for(profile: dict) -> bool:
+    """(2026-09-28) Tab VEO có chạy không. Chỉ tắt được khi Omni đang bật —
+    tắt cả 2 thì coi như vẫn chạy VEO (không để profile đứng không)."""
+    try:
+        v = profile.get('veo_enabled')
+        on = True if v is None else bool(int(v))
+    except (TypeError, ValueError):
+        on = True
+    return on or not omni_enabled_for(profile)
+
+
 class OmniLane:
     def __init__(self, worker):
         self.w = worker

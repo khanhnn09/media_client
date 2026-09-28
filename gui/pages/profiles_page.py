@@ -311,9 +311,15 @@ class ProfilesPage(QWidget):
                 task_mode = p.get('task_mode', 'all')
                 text, color = _TASK_MODE_ENGINE_BADGE.get(task_mode, _TASK_MODE_ENGINE_BADGE['all'])
                 engine_badge = Badge(text, color)
-                sub_parts = [f'{worker_mode.upper()} mode', f'x{max_conc}']
-                if int(p.get('omni_enabled') or 0):
-                    sub_parts.append('+ Omni')
+                veo_on = str(p.get('veo_enabled', 1)) not in ('0', 'False') or not int(p.get('omni_enabled') or 0)
+                omni_on = int(p.get('omni_enabled') or 0)
+                if veo_on:
+                    sub_parts = [f'{worker_mode.upper()} mode', f'x{max_conc}']
+                    if omni_on:
+                        sub_parts.append('+ Omni')
+                else:
+                    engine_badge = Badge('🎬 Chỉ Omni', 'purple')
+                    sub_parts = ['Omni (Google Vids) · chỉ task video']
                 # (2026-09-17) Khung giờ chạy riêng — rỗng = chạy liên tục, không hiện.
                 hours_span = summarize_run_hours(p.get('run_hours'))
                 if hours_span:
