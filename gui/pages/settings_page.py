@@ -72,8 +72,6 @@ _TABS = [
          'Đạt ngưỡng thì tự tạo project Flow mới. 0 = tắt.'),
     ]),
     ('Lỗi & phục hồi', [
-        ('error_count_before_refresh',       'Lỗi liên tiếp trước khi refresh', 'int', ''),
-        ('refresh_count_before_new_project', 'Số lần refresh trước khi tạo project mới', 'int', ''),
         ('error_sleep_secs',                 'Thời gian ngủ khi escalation (giây)', 'int', ''),
         ('error_wait_secs',                  'Chờ sau lỗi trước khi thử lại (giây)', 'int', ''),
         ('batch_fail_count_before_sleep',    'Batch lỗi liên tiếp → ngủ', 'int',

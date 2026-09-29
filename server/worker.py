@@ -420,11 +420,8 @@ class SeleniumFlowWorker:
         # khởi động; sửa qua GUI trang Cài đặt áp dụng cho worker MỚI, không
         # hot-reload vào worker đang chạy giữa chừng.
         self._server_settings = get_local_settings()
-        # Đếm lỗi liên tiếp / số lần đã refresh cho project hiện tại — dùng cho escalation
-        # error → refresh trang → tạo project mới (xem _handle_task_error).
+        # Đếm lỗi task liên tiếp — chỉ để hiển thị trên dashboard (live_info).
         self._consecutive_errors = 0
-        self._refresh_count      = 0
-        self._project_resets_since_success = 0
         # Số item media project hiện tại (2026-07-21) — cập nhật mỗi lần reconcile
         # đọc projectInitialData thành công (_reconcile_project_media), dùng bởi
         # _rotate_project_if_full() để biết khi nào cần chuyển project mới.
@@ -432,7 +429,7 @@ class SeleniumFlowWorker:
         self._sleep_until        = 0.0
         # Live-tracking cho dashboard (main.py, xem live_info()) — chỉ phản ánh
         # PHIÊN CHẠY hiện tại của worker, KHÔNG persist DB — reset về 0 mỗi lần worker
-        # restart (giống _consecutive_errors/_refresh_count ở trên, cùng triết lý).
+        # restart (giống _consecutive_errors ở trên, cùng triết lý).
         self._current_task      = None  # {'id','mode','prompt','started_at'} khi đang xử lý
         self._task_done_count   = 0
         self._task_error_count  = 0
@@ -7114,7 +7111,6 @@ class SeleniumFlowWorker:
         self._task_done_count += 1
         self._current_task = None
         self._consecutive_errors = 0
-        self._project_resets_since_success = 0
         # (2026-08-20) Bậc thang THEO BATCH — đây là điểm funnel DUY NHẤT của MỌI
         # đường "task thành công" (DOM batch/API batch/tuần tự/reconcile — 9 call
         # site đều đi qua đây), nên đếm ở đúng chỗ này là đủ phủ hết mọi chế độ,
@@ -7155,10 +7151,8 @@ class SeleniumFlowWorker:
         của máy đang chạy đã lưu sẵn giá trị, xoá key sẽ làm chúng biến mất khi
         `update_local_settings()` ghi đè file).
 
-        2 bậc thang CÒN LẠI KHÔNG bị ảnh hưởng: (1) escalation LIÊN TIẾP
-        (`_handle_task_error()`: error_count_before_refresh → refresh →
-        refresh_count_before_new_project → project mới → ngủ) vẫn chạy nguyên;
-        (2) bậc thang THEO BATCH (§11.39) vẫn chạy nguyên."""
+        Bậc thang THEO BATCH (§11.39) vẫn chạy nguyên. (Thang "lỗi liên tiếp →
+        refresh → project mới" đã BỎ hẳn 2026-09-29.)"""
         self._task_error_count += 1
         self._current_task = None
         self._last_error_msg = message
@@ -7189,77 +7183,17 @@ class SeleniumFlowWorker:
         True nếu worker nên DỪNG HẲN (đã cho profile ngủ), False nếu vẫn tiếp tục vòng
         lặp bình thường."""
         if self._flow_block_applies() and self._is_flow_block_error(message):
-            # Tài khoản bị chặn — không phải lỗi task, không đẩy thang
-            # refresh/project mới/ngủ (xem `_enter_flow_block()`).
+            # Tài khoản bị chặn — không phải lỗi task (xem `_enter_flow_block()`).
             self._enter_flow_block(message)
             self._last_error_msg = message
             return False
         if self._record_error(message):
             return True
+        # (2026-09-29) Đã BỎ thang "N lỗi liên tiếp → refresh trang → M lần refresh
+        # → quay lại project / ngủ" (settings error_count_before_refresh /
+        # refresh_count_before_new_project) theo yêu cầu user. Chỉ còn đếm lỗi
+        # liên tiếp để hiển thị; ngủ do bậc thang THEO BATCH (_finish_batch_cleanup).
         self._consecutive_errors += 1
-        threshold_refresh = int(self._server_settings.get('error_count_before_refresh', 3))
-        if self._consecutive_errors < threshold_refresh:
-            return False
-
-        self._consecutive_errors = 0
-        self._refresh_count += 1
-        try:
-            self._nav_refresh(f'{threshold_refresh} lỗi task liên tiếp → refresh trang '
-                              f'(lần {self._refresh_count}, lỗi cuối: {(message or "")[:120]})')
-            self._sleep(5)
-        except Exception as e:
-            self._log('error', f'Refresh trang thất bại: {e}')
-
-        threshold_reset = int(self._server_settings.get('refresh_count_before_new_project', 5))
-        if self._refresh_count < threshold_reset:
-            return False
-
-        self._refresh_count = 0
-        self._project_resets_since_success += 1
-        if self._project_resets_since_success >= 2:
-            sleep_secs = int(self._server_settings.get('error_sleep_secs', 300))
-            self._log('error', f'Vẫn lỗi sau nhiều lần thử phục hồi — cho profile '
-                                f'"ngủ" {sleep_secs}s')
-            pm.set_status(self.profile_id, 'sleeping', clear_task=True, pid=None)
-            self._sleep_until = time.time() + sleep_secs
-            # Ghi vào dict module-level (không chỉ self) — thread worker sắp thoát,
-            # dispatcher (_veo3_dispatcher_tick) cần đọc được thời điểm hết ngủ này
-            # SAU KHI object worker/thread này đã bị reap, không còn cách nào lấy
-            # lại self._sleep_until nữa.
-            _sleep_until_by_pid[self.profile_id] = self._sleep_until
-            return True
-
-        # gemini_video/gemini_image KHÔNG có khái niệm "project" Flow — mỗi task
-        # đã tự navigate về GEMINI_URL (chat mới) ngay từ đầu
-        # `_run_task_gemini_video()`/`_run_task_gemini_image()`, nên bước phục
-        # hồi project ở đây vô nghĩa với 2 worker_mode này (gọi nhầm sẽ điều
-        # hướng sang labs.google, không phải lỗi nghiêm trọng vì task kế tiếp tự
-        # ghi đè lại, nhưng tốn thời gian/gây log khó hiểu) — bỏ qua, coi như đã
-        # "reset" (task tiếp theo tự về chat mới).
-        if self.worker_mode in ('gemini_video', 'gemini_image'):
-            self._log('info', f'{self.worker_mode} — bỏ qua bước phục hồi project (mỗi task tự vào chat mới)')
-            return False
-
-        # (2026-09-11, theo yêu cầu user "chỉ check trường hợp quá setting...
-        # 300 media thì tạo project mới còn lại không được tạo mới") — TRƯỚC
-        # ĐÂY ở đây gọi `_reset_flow_project()` (bấm "New project") khi refresh
-        # nhiều lần vẫn không hết lỗi. Nhưng lỗi liên tục kiểu này RẤT THƯỜNG
-        # do Google chặn/throttle ở TẦNG TÀI KHOẢN (PUBLIC_ERROR_UNUSUAL_
-        # ACTIVITY/RPC_ERROR_CODE_8...) — tạo project mới KHÔNG sửa được gì
-        # (tài khoản vẫn bị chặn), chỉ tạo thêm project không cần thiết — đúng
-        # triệu chứng user báo "đang có lỗi tạo project quá nhiều". Project
-        # MỚI CHỈ còn được tạo ở `_rotate_project_if_full()` (vượt
-        # `max_project_media_items`, mặc định 300) — ở đây CHỈ còn thử quay
-        # lại đúng project đã lưu (KHÔNG tính vào ngưỡng ngủ ở trên nữa —
-        # ngưỡng đó đã tính RỒI, đây chỉ là 1 lần cố phục hồi thêm trước khi
-        # vòng lặp task tiếp theo tự thử lại qua `_ensure_flow_page()`).
-        returned = self._return_to_saved_project()
-        self._log('warn' if not returned else 'ok',
-                  f'Vượt {threshold_reset} lần refresh cho project hiện tại — ' +
-                  ('đã quay lại được project đã lưu.' if returned else
-                   'KHÔNG tạo project mới (chỉ ngưỡng max_project_media_items '
-                   'mới được tạo mới) — vẫn chưa quay lại được, sẽ tự thử lại '
-                   'ở task kế tiếp.'))
         return False
 
     def _cdp_clear_cache_and_cookies(self):

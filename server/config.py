@@ -47,8 +47,7 @@ DEBUG             = os.getenv('DEBUG', 'false').lower() == 'true'
 
 # Fallback nếu chưa từng nhận được settings từ server (heartbeat đầu tiên lỗi/chưa chạy) —
 # khớp _SETTINGS_DEFAULTS trong backend/core/settings_store.py, cộng thêm 4 field veo3
-# mới (error_count_before_refresh/refresh_count_before_new_project/
-# max_concurrent_veo3_profiles/error_sleep_secs) — nếu server cũ chưa có 4 field này,
+# mới (max_concurrent_veo3_profiles/error_sleep_secs) — nếu server cũ chưa có 4 field này,
 # worker vẫn chạy được với default hợp lý ở đây thay vì crash vì thiếu key.
 _DEFAULT_SERVER_SETTINGS = {
     'error_wait_secs':      60,
@@ -57,8 +56,6 @@ _DEFAULT_SERVER_SETTINGS = {
     'step_delay_min_secs':  1.0,
     'step_delay_max_secs':  3.0,
     'error_patterns':       [],
-    'error_count_before_refresh':      3,
-    'refresh_count_before_new_project': 5,
     'max_concurrent_veo3_profiles':    1,
     'error_sleep_secs':                300,
     'error_window_minutes':            10,
@@ -162,10 +159,8 @@ _DEFAULT_SERVER_SETTINGS = {
     # tất cả cookie - cache -> rồi check login -> đăng nhập vào project lại như
     # trước -> vòng lặp cứ thế".
     #
-    # SONG SONG (KHÔNG thay thế) 2 bậc thang THEO TASK đã có:
-    #   (1) `error_count_before_refresh`/`refresh_count_before_new_project` —
-    #       đếm lỗi LIÊN TIẾP từng task, escalate refresh → project mới → ngủ.
-    #   (2) `error_window_minutes`/`error_window_max_errors` — N lỗi trong M phút.
+    # (Thang lỗi LIÊN TIẾP theo task — error_count_before_refresh /
+    # refresh_count_before_new_project — đã BỎ 2026-09-29; `error_window_*` đang tạm tắt.)
     # Bậc thang MỚI này đếm ở mức BATCH (1 lần heartbeat nhận về N task): batch
     # có ÍT NHẤT 1 task thành công = batch THÀNH CÔNG (reset bộ đếm về 0, dù
     # N-1 task còn lại có lỗi hết) — chỉ batch KHÔNG task nào thành công mới

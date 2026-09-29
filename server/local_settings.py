@@ -55,7 +55,6 @@ def _clamp(settings: dict) -> dict:
     s = dict(settings)
 
     int_min1_keys = ('error_wait_secs', 'task_delay_secs', 'download_wait_secs',
-                      'error_count_before_refresh', 'refresh_count_before_new_project',
                       'error_sleep_secs', 'error_window_minutes', 'error_window_max_errors',
                       'reconcile_wait_secs', 'reconcile_max_rounds',
                       'batch_fail_count_before_sleep',
