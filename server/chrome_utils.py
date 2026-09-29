@@ -698,6 +698,37 @@ def _chrome_running_for_profile(profile_dir: str) -> bool:
     return bool(_chrome_procs_for_profile(profile_dir))
 
 
+def _pin_driver_to_running_browser(opts, debug_port: int) -> None:
+    """(2026-09-29) Attach vào trình duyệt ĐANG CHẠY mà chromedriver cục bộ lệch
+    bản → `_make_service()` trả `Service()` trống cho Selenium Manager tự tải.
+    Nhưng khi attach, options KHÔNG có `binary_location` nên Selenium Manager lấy
+    bản Chrome hệ thống (vd 154) — sai hẳn nếu thứ đang chạy là CloakBrowser
+    (Chromium 146) hay Chrome Portable ⇒ "ChromeDriver only supports Chrome
+    version 154, current browser version is 146". Ghim theo bản ĐANG CHẠY:
+    có binary cùng major trên máy (Cloak/Portable) thì dùng làm binary_location,
+    không thì đặt browser_version."""
+    want = _running_chrome_major(debug_port)
+    if not want:
+        return
+    drv = _detect_chromedriver()
+    if drv and _chromedriver_major_version(drv) == want:
+        return   # file cục bộ đã khớp — Selenium Manager không tham gia
+    import glob
+    cands = glob.glob(str(Path.home() / '.cloakbrowser' / f'chromium-{want}.*' / 'chrome.exe'))
+    try:
+        cands += [p['exe'] for p in _detect_chrome_portables()]
+    except Exception:
+        pass
+    for exe in cands:
+        if exe and Path(exe).exists() and _detect_chrome_version(exe) == want:
+            opts.binary_location = exe
+            return
+    try:
+        opts.browser_version = str(want)
+    except Exception:
+        pass
+
+
 def _connect_to_chrome(debug_port: int, log_fn=None):
     """
     Attach Selenium vào Chrome đang chạy qua remote debugging port.
@@ -724,6 +755,7 @@ def _connect_to_chrome(debug_port: int, log_fn=None):
         # (Chrome đã mở). Thiếu → get_log('performance') fail, không bắt được
         # x-browser-validation / sessionId. Mirror tests/utils/flow_session.py.
         opts.set_capability('goog:loggingPrefs', {'performance': 'ALL', 'browser': 'ALL'})
+        _pin_driver_to_running_browser(opts, debug_port)
         driver = webdriver.Chrome(service=_make_service(debug_port=debug_port), options=opts)
 
         # Kiểm tra liveness với timeout riêng (Chrome có thể đang load)

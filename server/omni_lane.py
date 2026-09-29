@@ -60,6 +60,10 @@ def _is_transient(msg: str) -> bool:
 _ACCOUNT_BACKOFF_SECS = 600
 _GENERATE_TIMEOUT_SECS = omni_be.GENERATE_TIMEOUT_SECS + 15   # JS tự huỷ fetch trước mốc này
 _PAGE_MAX_AGE_SECS = 1800     # nạp lại trang Vids định kỳ (token docs-est có hạn)
+# (2026-09-29) Task Omni lỗi → quay về trang chủ Vids tạo tài liệu MỚI, các task
+# sau chạy trên tài liệu mới đó. Không tạo liên tục quá nhịp này.
+_NEW_DOC_MIN_GAP_SECS = 60
+_NEW_DOC_BTN_SELECTOR = '.docs-homescreen-templates-templateview'
 
 
 # Tài liệu Vids làm ngữ cảnh — BẮT BUỘC: generate text→video KHÔNG kèm
@@ -165,6 +169,8 @@ class OmniLane:
         self.done_count = 0
         self.error_count = 0
         self.inflight = 0              # số task đang tạo — dispatcher không đóng profile khi > 0
+        self.need_new_doc = False      # có task lỗi → tạo tài liệu Vids mới trước lô kế tiếp
+        self._new_doc_at = 0.0
 
     # ── log ────────────────────────────────────────────────────────────────
     def _log(self, level, msg):
@@ -320,6 +326,10 @@ class OmniLane:
                     self._heartbeat(keepalive_only=True)
                     stop.wait(POLL_INTERVAL)
                     continue
+                if self.need_new_doc and not self._rotate_doc():
+                    self._heartbeat(keepalive_only=True)
+                    stop.wait(POLL_INTERVAL)
+                    continue
                 if not self._ensure_page():
                     stop.wait(POLL_INTERVAL)
                     continue
@@ -444,6 +454,64 @@ class OmniLane:
             self._refresh_page()
         self._start_task(t, pending, attempt + 1)
 
+    def _rotate_doc(self) -> bool:
+        """(2026-09-29) Có task lỗi → về trang chủ Vids (`VIDS_HOME_URL`), bấm
+        "Bắt đầu một video mới" để tạo tài liệu MỚI, lưu lại (`omni_docs.json`)
+        để mọi task sau — kể cả lần mở tool sau — chạy trên tài liệu mới này.
+        Chạy qua CDP của tab Omni, không đụng phiên Selenium của VEO. Chỉ gọi khi
+        tab rảnh (giữa 2 lô) vì điều hướng làm mất kết quả task đang tạo."""
+        now = time.time()
+        if now - self._new_doc_at < _NEW_DOC_MIN_GAP_SECS:
+            return False
+        self._new_doc_at = now
+        old = self.doc_url or ''
+        self._log('info', f'Có task lỗi — về {omni_be.VIDS_HOME_URL} tạo tài liệu Vids mới')
+        try:
+            url = self.tab.navigate(omni_be.VIDS_HOME_URL, wait=40)
+            if 'accounts.google.com' in url:
+                self._log('warn', 'Trang chủ Vids đá ra trang đăng nhập — chờ đăng nhập lại')
+                self.need_relogin = True
+                return False
+            rect = None
+            for _ in range(20):
+                rect = self.tab.evaluate(
+                    "(()=>{const e=document.querySelector(%s);if(!e)return null;"
+                    "e.scrollIntoView({block:'center'});const r=e.getBoundingClientRect();"
+                    "return r.width&&r.height?{x:r.left+r.width/2,y:r.top+r.height/2}:null})()"
+                    % json.dumps(_NEW_DOC_BTN_SELECTOR), timeout=10, await_promise=False)
+                if rect:
+                    break
+                time.sleep(1)
+            if not rect:
+                self._log('error', 'Không thấy nút "Bắt đầu một video mới" trên trang chủ Vids')
+                return False
+            x, y = rect['x'], rect['y']
+            self.tab.send('Input.dispatchMouseEvent', {'type': 'mouseMoved', 'x': x, 'y': y})
+            for t in ('mousePressed', 'mouseReleased'):
+                self.tab.send('Input.dispatchMouseEvent',
+                              {'type': t, 'x': x, 'y': y, 'button': 'left', 'clickCount': 1})
+            new = ''
+            t0 = time.time()
+            while time.time() - t0 < 40:
+                cur = self.tab.url()
+                if '/videos/' in cur and '/d/' in cur and cur.split('?')[0] != old.split('?')[0]:
+                    new = cur.split('?')[0].split('#')[0]
+                    break
+                time.sleep(1)
+            if not new:
+                self._log('error', 'Bấm "Bắt đầu một video mới" nhưng không vào được tài liệu mới')
+                return False
+            time.sleep(5)                       # chờ tài liệu tải xong (docs-est, api key)
+            _save_doc(_doc_key(self.w.profile), new)
+            self.doc_url = new
+            self._page_loaded_at = time.time()
+            self.need_new_doc = False
+            self._log('ok', f'Đã tạo tài liệu Vids mới — các task sau chạy trên: {new}')
+            return True
+        except Exception as e:
+            self._log('warn', f'Tạo tài liệu Vids mới lỗi: {e}')
+            return False
+
     def _refresh_page(self):
         """Nạp lại tab Vids + đọc lại token. Sau khi đổi IP, request cũ trong trang
         đã chết; nạp lại để có trang/kết nối mới sạch."""
@@ -468,9 +536,15 @@ class OmniLane:
                               f'{omni_be.MAX_INGREDIENTS}, dùng {omni_be.MAX_INGREDIENTS} ảnh đầu')
             urls = urls[:omni_be.MAX_INGREDIENTS]
         ings = []
+        self._inputs = getattr(self, '_inputs', {})
+        self._inputs[task_id] = {'prompt': prompt, 'mode': task.get('mode'),
+                                 'aspect_ratio': task.get('aspect_ratio'),
+                                 'duration': task.get('omniDuration') or task.get('video_duration'),
+                                 'images': []}
         for i, u in enumerate(urls):
             r = req_lib.get(u, timeout=60)
             r.raise_for_status()
+            self._inputs[task_id]['images'].append((u, (getattr(r, 'headers', None) or {}).get('content-type', ''), r.content))
             b64 = base64.b64encode(r.content).decode()
             up = self._step(f'upload ảnh {i + 1}', lambda: self.tab.evaluate(
                 omni_be.call_expr('upload', b64), timeout=120) or {}, ok=lambda x: x.get('blobId'))
@@ -501,12 +575,13 @@ class OmniLane:
         r = self._step('tải video', lambda: self.tab.evaluate(
             omni_be.call_expr('fetchB64', urls[0]), timeout=180) or {}, ok=lambda x: x.get('b64'))
         data = base64.b64decode(r['b64'])
-        self._step('gửi kết quả về server', lambda: self.w._upload_video_result(task_id, data) or True)
+        self._step('gửi kết quả về server', lambda: self.w._upload_video_result(task_id, data, source='omni') or True)
         self.done_count += 1
         try:
             pm.bump_task_stat(self.profile_id, 'done')
         except Exception:
             pass
+        (getattr(self, '_inputs', {}) or {}).pop(task_id, None)
         self._log('ok', f'✔ Task #{task_id} xong ({elapsed:.0f}s, {len(data) // 1024}KB)')
 
     def _step(self, name: str, fn, ok=bool):
@@ -527,10 +602,45 @@ class OmniLane:
             self._halt.wait(5)
         raise RuntimeError(f'{name} lỗi: {last}')
 
+    def _dump_refused(self, task_id, msg: str):
+        """(2026-09-29) Google Vids trả REQUEST_REFUSED (400, bộ lọc nội dung) cho
+        1 số task cố định — lưu prompt + ảnh thành phần vào logs/omni_refused/ để
+        xem đúng nội dung nào bị chặn. Giữ tối đa 50 task gần nhất."""
+        inp = (getattr(self, '_inputs', {}) or {}).get(task_id)
+        if not inp:
+            return
+        try:
+            from .config import LOGS_DIR
+            d = Path(LOGS_DIR) / 'omni_refused' / f'task_{task_id}'
+            d.mkdir(parents=True, exist_ok=True)
+            imgs = []
+            for i, (u, ctype, data) in enumerate(inp['images']):
+                ext = 'png' if data[1:4] == b'PNG' else ('webp' if data[8:12] == b'WEBP' else 'jpg')
+                (d / f'image_{i + 1}.{ext}').write_bytes(data)
+                imgs.append({'url': u, 'contentType': ctype, 'bytes': len(data), 'file': f'image_{i + 1}.{ext}'})
+            (d / 'info.json').write_text(json.dumps(
+                {'taskId': task_id, 'profile': self.profile_id, 'error': msg[:500],
+                 'mode': inp['mode'], 'aspect_ratio': inp['aspect_ratio'], 'duration': inp['duration'],
+                 'prompt_len': len(inp['prompt']), 'prompt': inp['prompt'], 'images': imgs,
+                 'at': time.strftime('%Y-%m-%d %H:%M:%S')}, ensure_ascii=False, indent=1), encoding='utf-8')
+            olds = sorted(d.parent.iterdir(), key=lambda x: x.stat().st_mtime)
+            for x in olds[:-50]:
+                import shutil
+                shutil.rmtree(x, ignore_errors=True)
+            self._log('warn', f'Task #{task_id}: Google từ chối nội dung — đã lưu prompt + ảnh vào {d}')
+        except Exception as e:
+            self._log('warn', f'Không lưu được dữ liệu task bị từ chối: {e}')
+
     def _fail(self, task: dict, err):
         msg = str(err)
+        if 'REQUEST_REFUSED' in msg:
+            self._dump_refused(task['id'], msg)
+        (getattr(self, '_inputs', {}) or {}).pop(task['id'], None)
         self._log('error', f'✘ Task #{task["id"]}: {msg[:300]}')
         self._report_error(task['id'], msg[:500])
+        if not self.need_new_doc:
+            self._log('warn', 'Sẽ tạo tài liệu Vids mới sau lô này — các task sau chạy trên tài liệu mới')
+        self.need_new_doc = True
         if any(h in msg for h in _ACCOUNT_BLOCK_HINTS):
             self._backoff_until = time.time() + _ACCOUNT_BACKOFF_SECS
             self._log('warn', f'Lỗi tầng tài khoản — làn Omni nghỉ {_ACCOUNT_BACKOFF_SECS // 60} phút')

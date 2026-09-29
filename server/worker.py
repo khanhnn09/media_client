@@ -33,6 +33,8 @@ from .chrome_utils import (
     _usable_profile_dir,
 )
 from .state import _login_drivers, _sleep_until_by_pid, _force_login_check
+from .state import (_flow_block_until_by_pid, _flow_block_level_by_pid,
+                    _flow_block_last_at_by_pid, _flow_release_counts)
 
 # (2026-08-18, fix bug thật user báo — log warn "KHÔNG có trong veo_models.
 # model_key_ingredient" cho case ĐÃ ĐÚNG) `model_catalog.resolve_image_model()`/
@@ -580,13 +582,18 @@ class SeleniumFlowWorker:
         if err is not None:
             raise err
 
+    # (2026-09-29) Tải/điều hướng trang đổi f.sid — bỏ cache session batchexecute
+    # để lần sau đọc lại từ lệnh trang TỰ bắn (không phải refresh thêm lần nữa).
     def _nav_refresh(self, reason: str):
+        self._be_session_cache = None
         self._nav('refresh', reason, lambda: self.driver.refresh())
 
     def _nav_get(self, url: str, reason: str):
+        self._be_session_cache = None
         self._nav('get', reason, lambda: self.driver.get(url), url=url)
 
     def _nav_js_href(self, url: str, reason: str):
+        self._be_session_cache = None
         self._nav('js-href', reason,
                   lambda: self._js('window.location.href = arguments[0];', url), url=url)
 
@@ -1056,6 +1063,11 @@ class SeleniumFlowWorker:
         Trả True nếu escalation cho profile ngủ."""
         task_id = task['id']
         msg = str(err)
+        if self._is_flow_block_error(msg):
+            # Bị chặn tầng tài khoản — chạy DOM cùng tài khoản cũng bị chặn.
+            self._log('error', f'Task #{task_id} bị Google chặn: {msg[:200]}')
+            self._report_task_error(task_id, msg)
+            return False
         if dom_queue is not None:
             self._log('warn', f'[api→dom] Task #{task_id} lỗi API ({msg[:200]}) '
                               f'→ sẽ chạy lại bằng DOM')
@@ -2973,7 +2985,12 @@ class SeleniumFlowWorker:
         # (rẻ), chỉ khi không có gì mới chịu refresh.
         sess = None
         if getattr(self, '_be_interceptor_installed', False):
-            sess = self._be_session_from_page()
+            deadline = time.time() + 8
+            while True:
+                sess = self._be_session_from_page()
+                if sess or time.time() >= deadline:
+                    break
+                self._sleep(1)
         if not sess:
             sess = self._batchexecute_harvest_session()
         if not sess:
@@ -3254,12 +3271,23 @@ class SeleniumFlowWorker:
             self._log('warn', 'batchexecute: không trích được project id từ URL')
             return None
 
-        session = self._batchexecute_harvest_session()
+        # (2026-09-29) Dùng session CÓ CACHE — trước đây luôn gọi
+        # `_batchexecute_harvest_session()` (refresh trang ~15s) ở MỖI lần
+        # reconcile/pre-check, cộng với refresh cuối batch là ~2 lần tải trang
+        # mỗi lô. Tải trang dồn dập là 1 tín hiệu Google tính vào nhịp bất thường.
+        session = self._be_session()
         if not session:
             return None
 
         zzl_raw = self._batchexecute_call(
             'Zzl0ze', [f'projects/{project_id}', None, None, None, [1]], session)
+        if not zzl_raw:
+            # Session cache có thể đã hết hạn — lấy lại 1 lần rồi thử lại.
+            session = self._be_session(force=True)
+            if not session:
+                return None
+            zzl_raw = self._batchexecute_call(
+                'Zzl0ze', [f'projects/{project_id}', None, None, None, [1]], session)
         if not zzl_raw:
             return None
         try:
@@ -3298,6 +3326,10 @@ class SeleniumFlowWorker:
                     continue
                 detail_uuid = meta[4]
                 if not detail_uuid:
+                    continue
+                # Bản upscale 1080p (`<uuid>_upsampled`) là media PHỤ của video đã có —
+                # đã được luồng upscale lưu riêng, không reconcile như task mới.
+                if str(detail_uuid).endswith(flow_be.UPSAMPLED_SUFFIX):
                     continue
                 ts_pair = meta[1] if len(meta) > 1 else None
                 created_at = ts_pair[0] if isinstance(ts_pair, list) and ts_pair else 0
@@ -5410,7 +5442,8 @@ class SeleniumFlowWorker:
         _head, data = result['dataUrl'].split(',', 1)
         return base64.b64decode(data)
 
-    def _upload_video_result(self, task_id, video_bytes: bytes, filename: str = 'video.mp4') -> dict:
+    def _upload_video_result(self, task_id, video_bytes: bytes, filename: str = 'video.mp4',
+                             source: str = '') -> dict:
         """Upload trực tiếp bytes video làm kết quả task — dùng
         `/api/media/task/<id>/upload_result` (multipart, CÓ SẴN — dùng bởi
         tính năng "Thêm video thủ công" trên web, `_apply_media_to_task()` tự
@@ -5418,7 +5451,11 @@ class SeleniumFlowWorker:
         `video_url` của Gemini cần session cookie, server backend không tải
         được trực tiếp — xem docstring `_gemini_video_extract_base64`."""
         url = f'{FLOW_SERVER}/api/media/task/{task_id}/upload_result'
-        r = req_lib.post(url, files={'files': (filename, video_bytes, 'video/mp4')}, timeout=120)
+        # `source` — nguồn tạo video (omni/gemini_video) để web phân loại, và biết
+        # video KHÔNG upscale được qua Flow (chỉ video VEO trong Flow mới upscale).
+        src = source or ('gemini_video' if self.worker_mode == 'gemini_video' else 'upload')
+        r = req_lib.post(url, files={'files': (filename, video_bytes, 'video/mp4')},
+                         data={'source': src}, timeout=120)
         r.raise_for_status()
         data = r.json()
         if not data.get('success', True):
@@ -5547,7 +5584,7 @@ class SeleniumFlowWorker:
         `status='done'`, giống hệt cơ chế "Render lại" dùng khắp NanoBananaPro."""
         url = f'{FLOW_SERVER}/api/media/task/{task_id}/upload_result'
         payload = [('files', f) for f in files]
-        r = req_lib.post(url, files=payload, timeout=120)
+        r = req_lib.post(url, files=payload, data={'source': 'gemini_image'}, timeout=120)
         r.raise_for_status()
         data = r.json()
         if not data.get('success', True):
@@ -7084,6 +7121,8 @@ class SeleniumFlowWorker:
         # không cần rải counter ra từng nhánh. Batch có ≥1 task tăng biến này =
         # batch THÀNH CÔNG (xem `_evaluate_batch_outcome()`).
         self._batch_success_count += 1
+        if _flow_block_level_by_pid.pop(self.profile_id, None):
+            self._log('info', 'Task thành công sau khi bị chặn — reset bậc nghỉ')
         # Bộ đếm BỀN VỮNG trong ngày (2026-07-18) — khác _task_done_count ở trên
         # (chỉ sống trong RAM, mất khi worker restart), lưu ở backend qua
         # selenium_profiles.tasks_done_today, xem CHANGELOG "profile lưu thêm số
@@ -7149,6 +7188,12 @@ class SeleniumFlowWorker:
         """Gọi trong except block của _run_task_dom/_run_task_api/_run_tasks_batch. Trả
         True nếu worker nên DỪNG HẲN (đã cho profile ngủ), False nếu vẫn tiếp tục vòng
         lặp bình thường."""
+        if self._flow_block_applies() and self._is_flow_block_error(message):
+            # Tài khoản bị chặn — không phải lỗi task, không đẩy thang
+            # refresh/project mới/ngủ (xem `_enter_flow_block()`).
+            self._enter_flow_block(message)
+            self._last_error_msg = message
+            return False
         if self._record_error(message):
             return True
         self._consecutive_errors += 1
@@ -7407,14 +7452,22 @@ class SeleniumFlowWorker:
         # `_return_to_saved_project()` bên dưới đọc chính field này để quay về.
         self._sync_project_url_from_browser(before)
 
-        try:
-            self._nav_refresh('cuối batch: refresh trang project (sau bước dọn cookie nếu có) '
-                              'trước khi reconcile')
-        except Exception as e:
-            self._log('warn', f'[batch-clean] Refresh trang project sau khi xoá cookie lỗi: {e}')
-        wait_secs = settle_wait_secs if settle_wait_secs is not None else float(self._server_settings.get('task_delay_secs', 10))
-        if wait_secs > 0:
-            self._sleep(wait_secs)
+        # (2026-09-29) Không dọn cookie (click_create=False — trường hợp hiện tại
+        # duy nhất) và trang project vẫn làm việc được ⇒ KHÔNG refresh: reconcile
+        # đọc media qua RPC (`Zzl0ze`/`as29s`), không cần tải lại trang. Mỗi lần
+        # tải trang thừa là thêm 1 tín hiệu nhịp bất thường với Google.
+        skip_refresh = not click_create and self._project_page_ready()
+        if skip_refresh:
+            self._log('info', '[batch-clean] Trang project vẫn sẵn sàng — reconcile không cần refresh')
+        else:
+            try:
+                self._nav_refresh('cuối batch: refresh trang project (sau bước dọn cookie nếu có) '
+                                  'trước khi reconcile')
+            except Exception as e:
+                self._log('warn', f'[batch-clean] Refresh trang project sau khi xoá cookie lỗi: {e}')
+            wait_secs = settle_wait_secs if settle_wait_secs is not None else float(self._server_settings.get('task_delay_secs', 10))
+            if wait_secs > 0:
+                self._sleep(wait_secs)
 
         def _url():
             try:
@@ -7686,6 +7739,7 @@ class SeleniumFlowWorker:
                 return False
         self._apply_flow_binding(tasks)
         self._batch_success_count = 0
+        self._batch_blocked = False
         # (2026-09-13) Mốc đầu/cuối batch cho log điều hướng — xem `_nav_batch_end()`.
         self._nav_batch_begin(tasks)
         # Keepalive (2026-07-17): xác nhận qua DB thật — task #2457 (imageToVideo)
@@ -7763,6 +7817,14 @@ class SeleniumFlowWorker:
             # luôn submit hết batch (kể cả batch chỉ có 1 task) rồi mới
             # reconcile 1 lần cho cả batch, không còn check ngay sau từng task.
             # (2026-09-19) Check đầu batch — bỏ các task đã render xong từ trước.
+            if self._flow_block_remaining() > 0:
+                left = int(self._flow_block_remaining())
+                self._log('warn', f'Tài khoản đang nghỉ vì bị Google chặn (còn {left}s) — '
+                                  f'trả {len(tasks)} task về hàng chờ')
+                self._batch_blocked = True
+                self._release_tasks_for_block(tasks, f'profile đang nghỉ ({left}s)')
+                pm.set_status(self.profile_id, 'idle', clear_task=True, pid=threading.get_ident())
+                return False
             if self.worker_mode in ('dom', 'api'):
                 tasks = self._precheck_batch_done(tasks)
                 if not tasks:
@@ -7861,6 +7923,13 @@ class SeleniumFlowWorker:
                 self._recover_flow_project_page_after_cache_clear(click_create=False)
             return False
 
+        if getattr(self, '_batch_blocked', False):
+            self._log('warn', '[batch-escalation] Lô không có task thành công vì Google chặn '
+                               'tài khoản — KHÔNG tính vào bộ đếm batch lỗi.')
+            if is_flow:
+                self._recover_flow_project_page_after_cache_clear(click_create=False)
+            return False
+
         self._consecutive_failed_batches += 1
         n = self._consecutive_failed_batches
         threshold_sleep = int(self._server_settings.get('batch_fail_count_before_sleep', 3) or 3)
@@ -7895,7 +7964,103 @@ class SeleniumFlowWorker:
             self._recover_flow_project_page_after_cache_clear(click_create=False)
         return False
 
-    def _report_task_error(self, task_id, message: str):
+    # ── Google chặn tầng tài khoản (2026-09-29) ─────────────────────────────
+    # `PUBLIC_ERROR_UNUSUAL_ACTIVITY` / throttle KHÔNG phải lỗi của task: cùng
+    # task đó chạy lại sau cơn chặn là được. Trước đây bị báo `/task/error` như
+    # lỗi thường → đốt `retry_count`, server giao lại NGAY cho đúng tài khoản
+    # vừa bị chặn, và còn bị cộng vào thang escalation (refresh/ngủ/xoá cookie).
+    # Giờ: trả task qua `/task/release` (không trừ lượt, hoãn), profile nghỉ tạo
+    # mới một khoảng tăng dần, và giãn nhịp gửi một thời gian sau đó.
+    _FLOW_BLOCK_MARKERS = ('UNUSUAL_ACTIVITY', 'RPC_ERROR_CODE_8',
+                           'USER_REQUESTS_THROTTLED', 'RESOURCE_EXHAUSTED')
+
+    @classmethod
+    def _is_flow_block_error(cls, message) -> bool:
+        msg = str(message or '')
+        return any(m in msg for m in cls._FLOW_BLOCK_MARKERS)
+
+    def _flow_block_applies(self) -> bool:
+        return getattr(self, 'worker_mode', '') in ('dom', 'api')
+
+    def _flow_block_remaining(self) -> float:
+        if not self._flow_block_applies():
+            return 0.0
+        return max(0.0, _flow_block_until_by_pid.get(self.profile_id, 0) - time.time())
+
+    def _enter_flow_block(self, reason: str) -> None:
+        """Cho profile nghỉ tạo mới. Idempotent trong lúc ĐANG nghỉ (nhiều task
+        cùng lô cùng bị chặn chỉ tính 1 lần, không nâng bậc liên tục)."""
+        self._batch_blocked = True
+        now = time.time()
+        _flow_block_last_at_by_pid[self.profile_id] = now
+        if self._flow_block_remaining() > 0:
+            return
+        st = self._server_settings
+        lo = int(st.get('flow_block_cooldown_min_secs', 300) or 300)
+        hi = max(lo, int(st.get('flow_block_cooldown_max_secs', 1800) or lo))
+        level = _flow_block_level_by_pid.get(self.profile_id, 0)
+        secs = min(hi, lo * (2 ** level))
+        _flow_block_level_by_pid[self.profile_id] = level + 1
+        _flow_block_until_by_pid[self.profile_id] = now + secs
+        self._log('error', f'⛔ Google chặn tài khoản ({str(reason)[:160]}) — lần {level + 1} liên '
+                           f'tiếp. Nghỉ tạo mới {secs}s, task trả về hàng chờ KHÔNG trừ lượt '
+                           f'thử lại; sau đó giãn nhịp gửi.')
+
+    def _release_task(self, task_id, reason: str) -> bool:
+        """Trả task về hàng chờ (không trừ retry_count, hoãn). False = không
+        hoãn được (quá số lần / backend cũ) → caller báo lỗi như thường."""
+        st = self._server_settings
+        max_rel = int(st.get('flow_block_max_releases', 5) or 5)
+        n = _flow_release_counts.get(task_id, 0)
+        if n >= max_rel:
+            self._log('warn', f'Task #{task_id} đã hoãn {n} lần vì tài khoản bị chặn — báo lỗi như thường')
+            return False
+        delay = int(st.get('flow_block_task_delay_secs', 600) or 0)
+        try:
+            r = self._req('POST', f'{FLOW_SERVER}/api/media/task/release',
+                          body={'taskId': task_id, 'machineCode': self.machine_code,
+                                'delaySecs': delay,
+                                'reason': f'Google chặn tài khoản: {reason}'[:900]}) or {}
+        except Exception as e:
+            self._log('warn', f'Hoãn task #{task_id} lỗi ({e}) — báo lỗi như thường')
+            return False
+        if r.get('success') is False or r.get('error'):
+            self._log('warn', f'Backend từ chối /task/release ({r}) — báo lỗi như thường')
+            return False
+        _flow_release_counts[task_id] = n + 1
+        if len(_flow_release_counts) > 5000:
+            _flow_release_counts.clear()
+        self._log('warn', f'↩ Task #{task_id} trả về hàng chờ, hoãn {delay}s (lần {n + 1}/{max_rel})')
+        return True
+
+    def _release_tasks_for_block(self, tasks: list, reason: str) -> None:
+        for t in tasks:
+            if not self._release_task(t['id'], reason):
+                self._report_task_error(t['id'], f'Google chặn tài khoản: {reason}', _no_release=True)
+
+    def _stagger_delay(self, lo: float, hi: float) -> float:
+        """Giãn cách trước lần gửi kế tiếp: random [lo,hi], nhân hệ số nếu vừa
+        bị chặn gần đây, cộng thêm nghỉ định kỳ sau mỗi N lần gửi."""
+        st = self._server_settings
+        delay = random.uniform(lo, hi)
+        last = _flow_block_last_at_by_pid.get(self.profile_id, 0)
+        win = float(st.get('flow_block_slowdown_minutes', 60) or 0) * 60
+        if last and time.time() - last < win:
+            delay *= float(st.get('flow_block_slowdown_factor', 2.0) or 1.0)
+        every = int(st.get('submit_pause_every', 0) or 0)
+        self._submit_counter = getattr(self, '_submit_counter', 0) + 1
+        if every > 0 and self._submit_counter % every == 0:
+            pause = float(st.get('submit_pause_secs', 60) or 0)
+            self._log('info', f'⏸ Đã gửi {self._submit_counter} lệnh — nghỉ thêm {pause:.0f}s')
+            delay += pause
+        return delay
+
+    def _report_task_error(self, task_id, message: str, _no_release: bool = False):
+        if (not _no_release and self._flow_block_applies()
+                and self._is_flow_block_error(message)):
+            self._enter_flow_block(message)
+            if self._release_task(task_id, message):
+                return
         try:
             self._req('POST', f'{FLOW_SERVER}/api/media/task/error',
                       body={'taskId': task_id, 'machineCode': self.machine_code,
@@ -7983,12 +8148,28 @@ class SeleniumFlowWorker:
         stop_now = False
         futures = {}
 
+        block_evt = threading.Event()
+        block_msg: list = []
+
         def _worker(task, captcha):
-            return self._call_image_api_v2(task, captcha)
+            try:
+                return self._call_image_api_v2(task, captcha)
+            except Exception as e:
+                if self._is_flow_block_error(e):
+                    block_msg.append(str(e))
+                    block_evt.set()
+                raise
 
         with ThreadPoolExecutor(max_workers=max(1, len(tasks))) as pool:
             for i, task in enumerate(tasks):
                 if self._stop.is_set():
+                    break
+                # (2026-09-29) Đã bị chặn → đừng gửi tiếp (gửi trong cơn chặn chỉ
+                # làm nặng thêm) — trả phần còn lại của lô về hàng chờ.
+                if block_evt.is_set() or self._flow_block_remaining() > 0:
+                    reason = (block_msg or ['profile đang nghỉ'])[0]
+                    self._enter_flow_block(reason)
+                    self._release_tasks_for_block(tasks[i:], reason)
                     break
                 # Kiểm tra điều kiện RẺ trước, mint reCAPTCHA sau — mint là 1 lời
                 # gọi THẬT tới Google; task chắc chắn không đi API thì đừng gọi
@@ -8019,7 +8200,7 @@ class SeleniumFlowWorker:
                 futures[fut] = task
 
                 if i < len(tasks) - 1:
-                    delay = random.uniform(stagger_min, stagger_max)
+                    delay = self._stagger_delay(stagger_min, stagger_max)
                     self._log('info', f'⏳ Chờ {delay:.1f}s trước khi khởi động thread tiếp theo…')
                     if self._stop.wait(delay):
                         break
@@ -8094,12 +8275,27 @@ class SeleniumFlowWorker:
         stop_now = False
         futures = {}
 
+        block_evt = threading.Event()
+        block_msg: list = []
+
         def _worker(task, captcha, names):
-            self._call_video_api(task, captcha, uploaded_media_names=names)
+            try:
+                self._call_video_api(task, captcha, uploaded_media_names=names)
+            except Exception as e:
+                if self._is_flow_block_error(e):
+                    block_msg.append(str(e))
+                    block_evt.set()
+                raise
 
         with ThreadPoolExecutor(max_workers=max(1, len(tasks))) as pool:
             for i, task in enumerate(tasks):
                 if self._stop.is_set():
+                    break
+                if block_evt.is_set() or self._flow_block_remaining() > 0:
+                    reason = (block_msg or ['profile đang nghỉ'])[0]
+                    self._enter_flow_block(reason)
+                    self._release_tasks_for_block(tasks[i:], reason)
+                    attempted_ids.update(t['id'] for t in tasks[i:])
                     break
                 task_id = task['id']
                 mode = task.get('mode', 'textToVideo')
@@ -8139,7 +8335,7 @@ class SeleniumFlowWorker:
                 # `/task/error`, đốt `retry_count` và kích escalation gần như
                 # tức thì. Nhịp phải giữ bất kể task thành công hay hỏng.
                 if i < len(tasks) - 1:
-                    delay = random.uniform(stagger_min, stagger_max)
+                    delay = self._stagger_delay(stagger_min, stagger_max)
                     self._log('info', f'⏳ Chờ {delay:.1f}s trước khi sang task tiếp theo…')
                     if self._stop.wait(delay):
                         break
@@ -8688,8 +8884,22 @@ class SeleniumFlowWorker:
                     self._log('info', f'⏸ Ngoài khung giờ chạy ({span}) — tạm không nhận task')
                 else:
                     self._log('info', f'▶ Vào khung giờ chạy ({span}) — nhận task lại')
+            # (2026-09-29) Đang nghỉ vì Google chặn tài khoản — chỉ giữ last_seen.
+            blocked_left = 0 if keepalive_only else self._flow_block_remaining()
+            if bool(blocked_left) != getattr(self, '_flow_block_hb_paused', False):
+                self._flow_block_hb_paused = bool(blocked_left)
+                if blocked_left:
+                    self._log('info', f'⏸ Nghỉ nhận task {int(blocked_left)}s (tài khoản bị Google chặn)')
+                else:
+                    self._log('info', '▶ Hết nghỉ vì bị chặn — nhận task lại (giãn nhịp gửi thêm một thời gian)')
+            if blocked_left:
+                outside_hours = True
             if keepalive_only or outside_hours:
                 body['keepaliveOnly'] = True
+            # (2026-09-29) Nhận việc upscale 1080p video đã render trong Flow
+            # (chỉ VEO dom/api — media nằm trong project Flow của tài khoản này).
+            if self.worker_mode in ('dom', 'api') and not keepalive_only:
+                body['acceptUpscale'] = True
             # (2026-09-14) Chạy theo project + email — backend chỉ giao task của
             # project gán đúng email này (xem heartbeat.py `binding_clause`).
             if self._bind_mode_enabled():
@@ -8699,6 +8909,7 @@ class SeleniumFlowWorker:
             if outside_hours:
                 return []
             tasks = r.get('tasks') or ([r['task']] if r.get('task') else [])
+            self._queue_upscale_jobs(r.get('upscaleJobs') or [])
             if tasks:
                 ids = ', '.join(f'#{t.get("id")}' for t in tasks)
                 if keepalive_only:
@@ -8713,6 +8924,179 @@ class SeleniumFlowWorker:
         except Exception as e:
             self._log('warn', f'Heartbeat error: {e}')
             return []
+
+    # ── Upscale video 1080p trong Flow (2026-09-29) ───────────────────────────
+    # Luồng capture thật từ menu "Tải xuống → 1080p · Đã tăng độ phân giải":
+    #   p0UkFb (gửi, cần reCAPTCHA) → jwpduf (poll: 1 đang chạy, 3 xong)
+    #   → as29s("<uuid>_upsampled") lấy URL CDN mp4 1080p
+    #   → POST /api/media/task/<id>/upscale_result (server thay file 720p).
+    # Các lần GỬI cách nhau `upscale_gap_secs` (mặc định 10s) theo yêu cầu user.
+
+    _UPSCALE_POLL_SECS = 10
+    _UPSCALE_TIMEOUT_SECS = 900
+
+    def _queue_upscale_jobs(self, jobs: list):
+        if not jobs:
+            return
+        q = self.__dict__.setdefault('_upscale_jobs', [])
+        have = {j.get('taskId') for j in q}
+        new = [j for j in jobs if j.get('taskId') and j['taskId'] not in have]
+        if new:
+            q.extend(new)
+            self._log('info', f'← Nhận {len(new)} việc upscale 1080p: '
+                              + ', '.join(f"#{j['taskId']}" for j in new))
+
+    def _report_upscale(self, task_id, **body):
+        try:
+            self._req('POST', f'{FLOW_SERVER}/api/media/task/{task_id}/upscale_result',
+                      body={'machineCode': self.machine_code, **body})
+        except Exception as e:
+            self._log('warn', f'upscale #{task_id}: gửi kết quả về server lỗi: {e}')
+
+    def _flow_tile_ids(self, project_id: str, session: dict) -> dict:
+        """uuid media (meta[4]) → tile id (entry[0]) trong project Flow — p0UkFb cần cả 2."""
+        raw = self._batchexecute_call('Zzl0ze', [f'projects/{project_id}', None, None, None, [1]], session)
+        data = self._batchexecute_parse(raw, 'Zzl0ze') if raw else None
+        out = {}
+        for entry in (((data or [None, []])[1]) or []):
+            try:
+                meta = entry[3]
+                if isinstance(meta, list) and len(meta) > 4 and meta[4]:
+                    out[meta[4]] = entry[0]
+            except Exception:
+                continue
+        return out
+
+    def _process_upscale_jobs(self):
+        jobs, self._upscale_jobs = list(self._upscale_jobs), []
+        if not jobs or self._stop.is_set():
+            return
+        self._upscale_busy = True
+        try:
+            groups = {}
+            for j in jobs:
+                groups.setdefault(str(j.get('flowProjectId') or '').lower(), []).append(j)
+            for fid, group in groups.items():
+                self._process_upscale_group(fid, group)
+        except Exception as e:
+            self._log('error', f'Upscale lỗi: {e}')
+            for j in jobs:
+                if not j.get('_reported'):
+                    self._report_upscale(j['taskId'], error=f'Lỗi worker: {e}')
+        finally:
+            self._upscale_busy = False
+            # Trả trình duyệt về đúng project của profile nếu vừa đi project khác
+            try:
+                own = self._extract_project_id() or ''
+                if own and self._project_id_from_url(self.driver.current_url or '') != own:
+                    self._return_to_saved_project()
+            except Exception:
+                pass
+
+    def _process_upscale_group(self, fid: str, jobs: list):
+        def fail(j, msg):
+            j['_reported'] = True
+            self._log('warn', f'✗ Upscale #{j["taskId"]} {j.get("nameId") or ""}: {msg}')
+            self._report_upscale(j['taskId'], error=msg)
+
+        # Media nằm trong project Flow `fid` — phải đứng đúng project đó mới gọi được.
+        cur_pid = self._project_id_from_url(self.driver.current_url or '')
+        if fid and cur_pid != fid:
+            self._nav_get(f'https://flow.google.com/project/{fid}', 'upscale: vào project Flow chứa video')
+            self._sleep(6)
+            cur_pid = self._project_id_from_url(self.driver.current_url or '')
+            if cur_pid != fid:
+                for j in jobs:
+                    fail(j, f'không vào được project Flow {fid}')
+                return
+            self._be_session_cache = None
+        project_id = fid or cur_pid
+        session = self._be_session()
+        if not session:
+            for j in jobs:
+                fail(j, 'không lấy được session batchexecute')
+            return
+        tiles = self._flow_tile_ids(project_id, session)
+        gap = float(self._server_settings.get('upscale_gap_secs', 10) or 10)
+
+        running = []              # (job, upsampled_name, t0)
+        for i, j in enumerate(jobs):
+            if self._stop.is_set():
+                break
+            if i:
+                self._log('info', f'⏳ Chờ {gap:.0f}s trước lần upscale kế tiếp')
+                self._stop.wait(gap)
+            name = j.get('name') or ''
+            tile = tiles.get(name)
+            if not tile:
+                fail(j, f'không tìm thấy video {name[:8]}… trong project Flow (đã bị xoá?)')
+                continue
+            try:
+                captcha = self._get_fresh_recaptcha('VIDEO_GENERATION')
+                if not captcha:
+                    fail(j, 'không lấy được reCAPTCHA')
+                    continue
+                args = flow_be.build_upsample_video_args(
+                    project_id, captcha, name, tile, aspect_ratio=j.get('aspectRatio') or '16:9',
+                    model_key=flow_be.UPSAMPLE_MODEL_KEYS['1080p'])
+                self._log('info', f'▶ Upscale 1080p #{j["taskId"]} {j.get("nameId") or ""} '
+                                  f'(POST {flow_be.RPC_UPSAMPLE_VIDEO})')
+                raw = self._batchexecute_call(flow_be.RPC_UPSAMPLE_VIDEO, args, session, timeout=60)
+                payload = self._batchexecute_parse(raw, flow_be.RPC_UPSAMPLE_VIDEO) if raw else None
+                up_name = flow_be.parse_upsample_result(payload) if payload else ''
+                if not up_name:
+                    fail(j, f'Flow không nhận lệnh upscale — {str(raw)[:160]}')
+                    continue
+                running.append((j, up_name, time.time()))
+            except Exception as e:
+                fail(j, f'gửi lệnh upscale lỗi: {getattr(e, "reason", e)}')
+
+        last_ka = time.time()
+        while running and not self._stop.is_set():
+            self._stop.wait(self._UPSCALE_POLL_SECS)
+            if time.time() - last_ka >= POLL_INTERVAL:
+                self._heartbeat(keepalive_only=True)
+                last_ka = time.time()
+            try:
+                raw = self._batchexecute_call(flow_be.RPC_CHECK_VIDEO_STATUS,
+                                              [None, None, [[n] for _, n, _ in running]], session)
+                payload = self._batchexecute_parse(raw, flow_be.RPC_CHECK_VIDEO_STATUS) if raw else None
+            except Exception as e:
+                self._log('warn', f'upscale: poll trạng thái lỗi: {e}')
+                continue
+            still = []
+            for j, up_name, t0 in running:
+                st = flow_be.parse_video_status(payload, up_name) if payload else None
+                if st == 3:
+                    self._finish_upscale(j, up_name, session)
+                elif st in (None, 1, 2):
+                    if time.time() - t0 < self._UPSCALE_TIMEOUT_SECS:
+                        still.append((j, up_name, t0))
+                    else:
+                        fail(j, f'quá {self._UPSCALE_TIMEOUT_SECS}s chưa upscale xong')
+                else:
+                    fail(j, f'Flow báo upscale lỗi (trạng thái {st})')
+            running = still
+        for j, _, _ in running:
+            fail(j, 'worker dừng giữa lúc upscale')
+
+    def _finish_upscale(self, j: dict, up_name: str, session: dict):
+        j['_reported'] = True
+        try:
+            raw = self._batchexecute_call('as29s', [up_name], session)
+            data = self._batchexecute_parse(raw, 'as29s') if raw else None
+            url = flow_be.find_video_url(data) if data else ''
+            if not url:
+                raise RuntimeError('không lấy được URL bản 1080p')
+            r = self._req('POST', f'{FLOW_SERVER}/api/media/task/{j["taskId"]}/upscale_result',
+                          body={'machineCode': self.machine_code, 'name': j.get('name'),
+                                'upscaledName': up_name, 'url': url, 'resolution': '1080p'})
+            if isinstance(r, dict) and r.get('success') is False:
+                raise RuntimeError(r.get('error') or 'server không lưu được bản 1080p')
+            self._log('ok', f'✔ Upscale 1080p xong #{j["taskId"]} {j.get("nameId") or ""}')
+        except Exception as e:
+            self._log('warn', f'✗ Upscale #{j["taskId"]}: {e}')
+            self._report_upscale(j['taskId'], error=str(e))
 
     # ── Worker main loop ──────────────────────────────────────────────────────
 
@@ -8799,7 +9183,9 @@ class SeleniumFlowWorker:
                         if self._process_tasks(tasks):
                             self._log('warn', 'Profile chuyển sang trạng thái ngủ — thoát worker loop')
                             break
-                    else:
+                    if getattr(self, '_upscale_jobs', None):
+                        self._process_upscale_jobs()
+                    elif not tasks:
                         self._stop.wait(POLL_INTERVAL)
                 except Exception as e:
                     self._log('error', f'Worker loop: {e}')

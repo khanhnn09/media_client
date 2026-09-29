@@ -59,7 +59,9 @@ def _clamp(settings: dict) -> dict:
                       'error_sleep_secs', 'error_window_minutes', 'error_window_max_errors',
                       'reconcile_wait_secs', 'reconcile_max_rounds',
                       'batch_fail_count_before_sleep',
-                      'reconcile_lookback_secs', 'reconcile_retry_lookback_secs')
+                      'reconcile_lookback_secs', 'reconcile_retry_lookback_secs',
+                      'flow_block_cooldown_min_secs', 'flow_block_max_releases',
+                      'flow_block_slowdown_minutes')
     for k in int_min1_keys:
         if k in s:
             try:
@@ -94,8 +96,27 @@ def _clamp(settings: dict) -> dict:
         except (TypeError, ValueError):
             s['max_project_media_items'] = _DEFAULT_SERVER_SETTINGS['max_project_media_items']
 
+    # (2026-09-29) Chặn tầng tài khoản — xem config.py.
+    for k in ('flow_block_task_delay_secs', 'submit_pause_every', 'submit_pause_secs'):
+        if k in s:
+            try:
+                s[k] = max(0, int(s[k]))
+            except (TypeError, ValueError):
+                s[k] = _DEFAULT_SERVER_SETTINGS[k]
+    if 'flow_block_cooldown_max_secs' in s:
+        try:
+            s['flow_block_cooldown_max_secs'] = max(int(s['flow_block_cooldown_max_secs']),
+                                                    int(s.get('flow_block_cooldown_min_secs') or 1))
+        except (TypeError, ValueError):
+            s['flow_block_cooldown_max_secs'] = _DEFAULT_SERVER_SETTINGS['flow_block_cooldown_max_secs']
+    if 'flow_block_slowdown_factor' in s:
+        try:
+            s['flow_block_slowdown_factor'] = max(1.0, min(float(s['flow_block_slowdown_factor']), 10.0))
+        except (TypeError, ValueError):
+            s['flow_block_slowdown_factor'] = _DEFAULT_SERVER_SETTINGS['flow_block_slowdown_factor']
+
     for k in ('step_delay_min_secs', 'step_delay_max_secs',
-              'thread_stagger_min_secs', 'thread_stagger_max_secs'):
+              'thread_stagger_min_secs', 'thread_stagger_max_secs', 'upscale_gap_secs'):
         if k in s:
             try:
                 s[k] = max(0.0, float(s[k]))

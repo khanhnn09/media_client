@@ -281,3 +281,59 @@ def parse_video_workflow(payload) -> dict:
     return {'workflowId': uuids[0] if uuids else '',
             'mediaId': uuids[1] if len(uuids) > 1 else '',
             'raw': flat[:300]}
+
+
+# ── p0UkFb — upscale video (2026-09-29, capture thật trên Flow) ─────────────
+# Menu video → Tải xuống → "1080p · Đã tăng độ phân giải" gửi đúng lệnh này.
+# Miễn phí với 1080p (4K tốn 50 tín dụng). Kết quả là media MỚI
+# `<uuid gốc>_upsampled`; poll `jwpduf` tới khi trạng thái = 3 rồi `as29s`
+# media đó để lấy URL CDN mp4.
+RPC_UPSAMPLE_VIDEO = 'p0UkFb'           # /VideoFxService.BatchAsyncGenerateVideoUpsampleVideo
+RPC_CHECK_VIDEO_STATUS = 'jwpduf'       # /VideoFxService.BatchCheckAsyncVideoGenerationStatus
+UPSAMPLE_MODEL_KEYS = {'1080p': 'veo_3_1_upsampler_1080p', '4k': 'veo_3_1_upsampler_4k'}
+UPSAMPLED_SUFFIX = '_upsampled'
+
+
+def build_upsample_video_args(project_id: str, captcha: str, media_name: str, tile_id: str,
+                              *, aspect_ratio: str = '16:9',
+                              model_key: str = 'veo_3_1_upsampler_1080p') -> list:
+    """Shape y hệt capture: req[0]=[null,uuid video], req[2]=tỉ lệ, req[4]=[null,
+    tile id, null, null, UUID mới], req[6]=2, req[31]=model key."""
+    aspect = aspect_enum(aspect_ratio, video=True) or VIDEO_ASPECT_ENUM['16:9']
+    req = [None] * 32
+    req[0] = [None, media_name]
+    req[2] = aspect
+    req[4] = [None, tile_id, None, None, _uid()]
+    req[6] = 2
+    req[31] = model_key
+    return [[req], client_context(project_id, captcha), [_uid()]]
+
+
+def parse_upsample_result(payload) -> str:
+    """Tên media kết quả (`…_upsampled`) trong response p0UkFb."""
+    m = re.search(r'([0-9a-f\-]{36}' + UPSAMPLED_SUFFIX + ')', json.dumps(payload))
+    return m.group(1) if m else ''
+
+
+def parse_video_status(payload, media_name: str):
+    """Trạng thái 1 media trong response `jwpduf`: 1/2 = đang chạy, 3 = xong,
+    số khác = lỗi. Trả None nếu không tìm thấy media."""
+    try:
+        for item in (payload[2] or []):
+            if isinstance(item, list) and item and item[0] == media_name:
+                # item[5][8] = [trạng thái] — capture thật: [1] lúc đang chạy, [3] khi xong.
+                meta = item[5] if len(item) > 5 and isinstance(item[5], list) else []
+                st = meta[8] if len(meta) > 8 else None
+                if isinstance(st, list) and st and isinstance(st[0], int):
+                    return st[0]
+    except Exception:
+        pass
+    return None
+
+
+def find_video_url(payload) -> str:
+    for u in _CDN_URL_RE.findall(json.dumps(payload).replace('\u003d', '=').replace('\u0026', '&')):
+        u = u.replace('\u003d', '=').replace('\u0026', '&')
+        if '/video/' in u:
+            return u
+    return ''

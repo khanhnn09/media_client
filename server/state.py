@@ -38,6 +38,13 @@ _sleep_until_by_pid: dict = {}      # profile_id → epoch time hết "ngủ" (x
 # setting `google_login_check_enabled` như bình thường).
 _force_login_check: set = set()
 
+# (2026-09-29) Google chặn tầng tài khoản (UNUSUAL_ACTIVITY/throttle) — module-level
+# vì worker có thể bị auto-scale đóng/mở lại giữa chừng mà vẫn phải nhớ đang nghỉ.
+_flow_block_until_by_pid: dict = {}     # profile_id → epoch hết nghỉ tạo mới
+_flow_block_level_by_pid: dict = {}     # profile_id → số lần bị chặn liên tiếp
+_flow_block_last_at_by_pid: dict = {}   # profile_id → epoch lần bị chặn gần nhất (giãn nhịp)
+_flow_release_counts: dict = {}         # task_id → số lần đã hoãn vì bị chặn
+
 # Master switch (xem dispatcher.py::_set_master_task_intake) — 1 công tắc DUY NHẤT
 # cho CẢ client_tool (mọi profile, kể cả worker_mode='gemini'), điều khiển từ
 # main.py (Sidebar). Chỉ sống trong RAM — restart server luôn về lại mặc định.

@@ -267,6 +267,10 @@ def _profile_veo3_eligible(profile: dict, pending: dict) -> bool:
     vẫn có thể mismatch nhưng KHÔNG tệ hơn trước — chỉ mất đi phần chính xác mới
     thêm, không regress)."""
     worker_mode = profile.get('worker_mode')
+    # (2026-09-29) Có video chờ upscale 1080p của CHÍNH máy này → cần mở profile.
+    if worker_mode in ('api', 'dom') and profile.get('id') is not None:
+        if (pending.get('upscaleByMachine') or {}).get(f"selenium-{profile['id']}"):
+            return True
     if worker_mode == 'gemini_image':
         total = pending.get('imageTotalGeminiImage')
         if total is None:
@@ -350,7 +354,7 @@ def _run_hours_gate(profile: dict) -> bool:
 
 def _worker_busy(w) -> bool:
     """Worker còn việc dở: task VEO đang chạy HOẶC làn Omni đang tạo video."""
-    if w._current_task is not None:
+    if w._current_task is not None or getattr(w, '_upscale_busy', False):
         return True
     lane = getattr(w, '_omni', None)
     return bool(lane and lane.busy)

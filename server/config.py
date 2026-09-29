@@ -114,6 +114,7 @@ _DEFAULT_SERVER_SETTINGS = {
     # ĐÚNG task đó (không còn upload cả lô video 1 lượt trước khi generate).
     'thread_stagger_min_secs': 10.0,
     'thread_stagger_max_secs': 15.0,
+    'upscale_gap_secs': 10.0,           # giãn cách giữa 2 lần gửi upscale 1080p (Flow)
     # (2026-08-17) Bật/tắt bước "check đăng nhập Google" (`_ensure_google_login()`,
     # worker.py) — theo yêu cầu user "tạm tắt tính năng check login chạy thẳng
     # vào trang nhận task, khi cần có thể bật lại". TẮT (0, mặc định) = bỏ qua
@@ -185,6 +186,25 @@ _DEFAULT_SERVER_SETTINGS = {
     # (2026-09-24) Khi ngủ vì batch lỗi liên tiếp: 1 = xoá TẤT CẢ cookie/cache + ép
     # check đăng nhập lần sau (hành vi cũ); 0 = chỉ ngủ, không xoá gì.
     'batch_sleep_wipe_cookies': 1,
+    # (2026-09-29) Google chặn tầng tài khoản (`PUBLIC_ERROR_UNUSUAL_ACTIVITY` /
+    # throttle / RPC_ERROR_CODE_8) — KHÔNG tính là lỗi task (xem worker.py
+    # `_enter_flow_block()`): task trả về hàng chờ qua `/task/release` (không trừ
+    # retry_count) kèm hoãn `flow_block_task_delay_secs`; profile nghỉ tạo mới
+    # `flow_block_cooldown_min_secs`, gấp đôi mỗi lần bị chặn liên tiếp tới
+    # `flow_block_cooldown_max_secs`; 1 task bị hoãn quá `flow_block_max_releases`
+    # lần thì báo lỗi bình thường.
+    'flow_block_cooldown_min_secs': 300,
+    'flow_block_cooldown_max_secs': 1800,
+    'flow_block_task_delay_secs': 600,
+    'flow_block_max_releases': 5,
+    # Sau khi bị chặn: giãn cách gửi (thread_stagger_*) nhân `flow_block_slowdown_factor`
+    # trong `flow_block_slowdown_minutes` phút.
+    'flow_block_slowdown_factor': 2.0,
+    'flow_block_slowdown_minutes': 60,
+    # Cứ sau `submit_pause_every` lần gửi lệnh tạo (API) thì nghỉ `submit_pause_secs`
+    # giây. 0 = tắt.
+    'submit_pause_every': 0,
+    'submit_pause_secs': 60,
     # (2026-09-03) Cửa sổ "gần đây" (giây) khi `_dom_fetch_project_media()` lọc
     # candidate gọi RPC `as29s` — xem CLAUDE.md §11.45. `Zzl0ze` liệt kê MỌI
     # media của project (có thể hàng trăm), mà muốn biết prompt+URL của 1 item
