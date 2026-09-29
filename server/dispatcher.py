@@ -354,7 +354,12 @@ def _run_hours_gate(profile: dict) -> bool:
 
 def _worker_busy(w) -> bool:
     """Worker còn việc dở: task VEO đang chạy HOẶC làn Omni đang tạo video."""
-    if w._current_task is not None or getattr(w, '_upscale_busy', False):
+    # (2026-09-29) `_batch_active`: worker đã nhận lô từ heartbeat nhưng CHƯA
+    # chạy tới task nào (đang vào trang project / pre-check đầu batch) —
+    # `_current_task` vẫn None, trước đây dispatcher tưởng rảnh và đóng ngay,
+    # bỏ lô task đang giữ (kẹt 'assigned' tới khi reaper thu hồi).
+    if (w._current_task is not None or getattr(w, '_upscale_busy', False)
+            or getattr(w, '_batch_active', False)):
         return True
     lane = getattr(w, '_omni', None)
     return bool(lane and lane.busy)

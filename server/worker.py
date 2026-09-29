@@ -7740,6 +7740,7 @@ class SeleniumFlowWorker:
         self._apply_flow_binding(tasks)
         self._batch_success_count = 0
         self._batch_blocked = False
+        self._batch_active = True        # dispatcher không đóng worker giữa lô (xem dispatcher._worker_busy)
         # (2026-09-13) Mốc đầu/cuối batch cho log điều hướng — xem `_nav_batch_end()`.
         self._nav_batch_begin(tasks)
         # Keepalive (2026-07-17): xác nhận qua DB thật — task #2457 (imageToVideo)
@@ -7851,6 +7852,7 @@ class SeleniumFlowWorker:
                     self._stop.wait(delay)
             return False
         finally:
+            self._batch_active = False
             stop_keepalive.set()
             keepalive_thread.join(timeout=POLL_INTERVAL + 2)
             # (2026-08-20) CỐ Ý KHÔNG `return` ở đây — `return` trong `finally`
@@ -7923,6 +7925,9 @@ class SeleniumFlowWorker:
                 self._recover_flow_project_page_after_cache_clear(click_create=False)
             return False
 
+        if getattr(self, '_stop', None) is not None and self._stop.is_set():
+            # Worker bị dừng giữa lô (bấm Stop / dispatcher đóng) — không phải lô lỗi.
+            return False
         if getattr(self, '_batch_blocked', False):
             self._log('warn', '[batch-escalation] Lô không có task thành công vì Google chặn '
                                'tài khoản — KHÔNG tính vào bộ đếm batch lỗi.')
