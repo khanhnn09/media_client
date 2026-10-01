@@ -290,8 +290,13 @@ def _profile_veo3_eligible(profile: dict, pending: dict) -> bool:
         pending = _email_backlog(profile, pending)
     # (2026-09-27) Profile VEO bật "Kết hợp chạy Omni" — làn Omni nhận task video
     # bất kể task_mode của làn VEO, nên có backlog video là đủ lý do mở profile.
+    # (2026-09-29) Backlog Omni riêng (`projects.enable_omni`) — backend cũ chưa
+    # có field thì rơi về videoTotal như trước.
+    omni_total = pending.get('videoTotalOmni')
+    if omni_total is None:
+        omni_total = pending.get('videoTotal') or 0
     if (worker_mode in ('api', 'dom') and int(profile.get('omni_enabled') or 0)
-            and (pending.get('videoTotal') or 0) > 0):
+            and omni_total > 0):
         return True
     # (2026-09-28) Profile tắt VEO chỉ chạy Omni → chỉ backlog video mới là lý do mở.
     if worker_mode in ('api', 'dom') and not _veo_on(profile):
@@ -519,6 +524,11 @@ def _veo3_dispatcher_tick():
     gemini_video_budget  = pending.get('videoTotalGeminiVideo')
     if gemini_video_budget is None:
         gemini_video_budget = video_budget
+    # (2026-09-29) Profile CHỈ chạy Omni (tắt VEO) ăn backlog Omni riêng
+    # (`projects.enable_omni`), không trừ vào ngân sách video của VEO.
+    omni_budget          = pending.get('videoTotalOmni')
+    if omni_budget is None:
+        omni_budget = video_budget
     # (2026-09-14) Chế độ gán project + email — profile VEO (api/dom) chỉ ăn
     # backlog của ĐÚNG email mình (`byFlowEmail`), nên ngân sách cũng phải tính
     # RIÊNG theo email, không trừ vào `image_budget`/`video_budget` chung.
@@ -551,7 +561,8 @@ def _veo3_dispatcher_tick():
         wm = running_profile.get('worker_mode')
         tm = running_profile.get('task_mode') or 'all'
         if wm in ('api', 'dom') and not _veo_on(running_profile):
-            tm = 'video_only'          # chỉ Omni → chỉ ăn task video
+            omni_budget -= 1           # chỉ Omni → ăn backlog Omni
+            continue
         elif bind and wm in ('api', 'dom'):
             _eb_take(running_profile)
             continue
@@ -569,8 +580,10 @@ def _veo3_dispatcher_tick():
     video_budget         = max(0, video_budget)
     gemini_image_budget  = max(0, gemini_image_budget)
     gemini_video_budget  = max(0, gemini_video_budget)
+    omni_budget          = max(0, omni_budget)
 
     img_wait, vid_wait, all_wait, gemini_img_wait, gemini_vid_wait = [], [], [], [], []
+    omni_wait = []
     bound_wait = []
     for pid in waiting_pids:
         profile = pm.get(pid)
@@ -584,7 +597,7 @@ def _veo3_dispatcher_tick():
         wm = profile.get('worker_mode')
         tm = profile.get('task_mode') or 'all'
         if wm in ('api', 'dom') and not _veo_on(profile):
-            vid_wait.append(profile)   # chỉ Omni → cạnh tranh ngân sách video
+            omni_wait.append(profile)  # chỉ Omni → ngân sách Omni riêng
         elif bind and wm in ('api', 'dom'):
             bound_wait.append(profile)
         elif wm == 'gemini_image':
@@ -620,6 +633,11 @@ def _veo3_dispatcher_tick():
             break
         to_promote.append(profile)
         gemini_video_budget -= 1
+    for profile in omni_wait:
+        if len(to_promote) >= slots_free or omni_budget <= 0:
+            break
+        to_promote.append(profile)
+        omni_budget -= 1
     # combined_budget tính SAU KHI 2 nhóm trên đã lấy phần của mình — phần
     # CÒN LẠI mới là thứ 'all' được cạnh tranh, trừ thêm phần profile 'all'
     # ĐANG CHẠY coi như đã tiêu thụ (best-effort, không biết chính xác đang xử

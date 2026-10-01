@@ -31,7 +31,7 @@ import time
 from pathlib import Path
 
 from . import omni_be
-from .cdp_tab import CdpTab, CdpError
+from .cdp_tab import CdpTab, CdpError, debug_port_of
 from .config import FLOW_SERVER, POLL_INTERVAL, req_lib
 from .local_settings import get_local_settings
 from .managers import pm
@@ -64,6 +64,11 @@ _PAGE_MAX_AGE_SECS = 1800     # nạp lại trang Vids định kỳ (token docs-
 # sau chạy trên tài liệu mới đó. Không tạo liên tục quá nhịp này.
 _NEW_DOC_MIN_GAP_SECS = 60
 _NEW_DOC_BTN_SELECTOR = '.docs-homescreen-templates-templateview'
+# Lối tắt tạo tài liệu Vids trống (tương đương vids.new) — fallback cuối khi bấm nút không ăn.
+_NEW_DOC_CREATE_URL = 'https://docs.google.com/videos/create'
+# Tạo tài liệu mới thất bại liên tiếp ngần này lần → thôi, chạy tiếp trên tài liệu
+# cũ (trước đây làn đứng im vĩnh viễn, cứ 60s lại báo lỗi tạo tài liệu).
+_NEW_DOC_MAX_FAILS = 3
 
 
 # Tài liệu Vids làm ngữ cảnh — BẮT BUỘC: generate text→video KHÔNG kèm
@@ -170,6 +175,7 @@ class OmniLane:
         self.error_count = 0
         self.inflight = 0              # số task đang tạo — dispatcher không đóng profile khi > 0
         self.need_new_doc = False      # có task lỗi → tạo tài liệu Vids mới trước lô kế tiếp
+        self._new_doc_fails = 0
         self._new_doc_at = 0.0
 
     # ── log ────────────────────────────────────────────────────────────────
@@ -209,21 +215,8 @@ class OmniLane:
         return True
 
     def _real_debug_port(self) -> int:
-        """Cổng DevTools THẬT của Chrome đang chạy. ⚠️ KHÔNG tự tính `9300 + id`:
-        `undetected_chromedriver` tự chọn cổng ngẫu nhiên, bỏ qua
-        `--remote-debugging-port` mình đặt (lỗi thật: "port 9318 … actively
-        refused"). chromedriver luôn ghi cổng thật vào capability
-        `goog:chromeOptions.debuggerAddress` — đọc từ đó, không có mới dùng công thức."""
-        try:
-            caps = self.w.driver.capabilities or {}
-            for key in ('goog:chromeOptions', 'ms:edgeOptions'):
-                addr = (caps.get(key) or {}).get('debuggerAddress') or ''
-                if ':' in addr:
-                    return int(addr.rsplit(':', 1)[1])
-        except Exception:
-            pass
         from .chrome_utils import _chrome_debug_port
-        return _chrome_debug_port(self.profile_id)
+        return debug_port_of(self.w.driver, _chrome_debug_port(self.profile_id))
 
     def relogin_from_main_thread(self):
         """Worker gọi ở luồng chính khi `need_relogin` — dùng Selenium đăng nhập lại
@@ -327,9 +320,15 @@ class OmniLane:
                     stop.wait(POLL_INTERVAL)
                     continue
                 if self.need_new_doc and not self._rotate_doc():
-                    self._heartbeat(keepalive_only=True)
-                    stop.wait(POLL_INTERVAL)
-                    continue
+                    if self._new_doc_fails >= _NEW_DOC_MAX_FAILS:
+                        self._log('warn', f'Tạo tài liệu Vids mới thất bại {self._new_doc_fails} lần '
+                                          f'liên tiếp — chạy tiếp trên tài liệu cũ')
+                        self.need_new_doc = False
+                        self._new_doc_fails = 0
+                    else:
+                        self._heartbeat(keepalive_only=True)
+                        stop.wait(POLL_INTERVAL)
+                        continue
                 if not self._ensure_page():
                     stop.wait(POLL_INTERVAL)
                     continue
@@ -483,34 +482,63 @@ class OmniLane:
                     break
                 time.sleep(1)
             if not rect:
+                self._new_doc_fails += 1
                 self._log('error', 'Không thấy nút "Bắt đầu một video mới" trên trang chủ Vids')
                 return False
+            # (2026-09-29) Tab Omni nằm NỀN (driver quay về tab VEO) — Chrome hay bỏ qua
+            # chuột CDP gửi vào tab nền, nên bấm xong mà không đổi trang. Thử lần lượt:
+            # chuột CDP (đủ field `buttons`) → sự kiện chuột JS ngay trên phần tử →
+            # mở thẳng URL tạo tài liệu. KHÔNG đưa tab Omni lên trước vì tab VEO sẽ
+            # thành tab nền và dính đúng lỗi này.
             x, y = rect['x'], rect['y']
             self.tab.send('Input.dispatchMouseEvent', {'type': 'mouseMoved', 'x': x, 'y': y})
-            for t in ('mousePressed', 'mouseReleased'):
+            for t, b in (('mousePressed', 1), ('mouseReleased', 0)):
                 self.tab.send('Input.dispatchMouseEvent',
-                              {'type': t, 'x': x, 'y': y, 'button': 'left', 'clickCount': 1})
-            new = ''
-            t0 = time.time()
-            while time.time() - t0 < 40:
-                cur = self.tab.url()
-                if '/videos/' in cur and '/d/' in cur and cur.split('?')[0] != old.split('?')[0]:
-                    new = cur.split('?')[0].split('#')[0]
-                    break
-                time.sleep(1)
+                              {'type': t, 'x': x, 'y': y, 'button': 'left', 'buttons': b, 'clickCount': 1})
+            new = self._wait_new_doc(old, 12)
             if not new:
-                self._log('error', 'Bấm "Bắt đầu một video mới" nhưng không vào được tài liệu mới')
+                self._log('warn', 'Chuột CDP không mở được tài liệu (tab nền?) — thử sự kiện chuột JS')
+                self.tab.evaluate(
+                    "(()=>{const e=document.querySelector(%s);if(!e)return false;"
+                    "const r=e.getBoundingClientRect(),o={bubbles:true,cancelable:true,view:window,"
+                    "clientX:r.left+r.width/2,clientY:r.top+r.height/2,button:0};"
+                    "for(const t of ['pointerover','mouseover','pointerdown','mousedown'])"
+                    "e.dispatchEvent(new (t.startsWith('pointer')?PointerEvent:MouseEvent)(t,{...o,buttons:1}));"
+                    "for(const t of ['pointerup','mouseup','click'])"
+                    "e.dispatchEvent(new (t.startsWith('pointer')?PointerEvent:MouseEvent)(t,{...o,buttons:0}));"
+                    "return true})()" % json.dumps(_NEW_DOC_BTN_SELECTOR), timeout=10, await_promise=False)
+                new = self._wait_new_doc(old, 12)
+            if not new:
+                self._log('warn', f'Vẫn chưa vào tài liệu mới — thử mở thẳng {_NEW_DOC_CREATE_URL}')
+                self.tab.navigate(_NEW_DOC_CREATE_URL, wait=40)
+                new = self._wait_new_doc(old, 20)
+            if not new:
+                self._new_doc_fails += 1
+                self._log('error', f'Bấm "Bắt đầu một video mới" nhưng không vào được tài liệu mới '
+                                   f'(lần {self._new_doc_fails}/{_NEW_DOC_MAX_FAILS})')
                 return False
             time.sleep(5)                       # chờ tài liệu tải xong (docs-est, api key)
             _save_doc(_doc_key(self.w.profile), new)
             self.doc_url = new
             self._page_loaded_at = time.time()
             self.need_new_doc = False
+            self._new_doc_fails = 0
             self._log('ok', f'Đã tạo tài liệu Vids mới — các task sau chạy trên: {new}')
             return True
         except Exception as e:
+            self._new_doc_fails += 1
             self._log('warn', f'Tạo tài liệu Vids mới lỗi: {e}')
             return False
+
+    def _wait_new_doc(self, old: str, secs: float) -> str:
+        """Chờ tab Omni vào 1 tài liệu Vids KHÁC `old`; trả URL gọn hoặc ''."""
+        t0 = time.time()
+        while time.time() - t0 < secs:
+            cur = self.tab.url()
+            if '/videos/' in cur and '/d/' in cur and cur.split('?')[0] != old.split('?')[0]:
+                return cur.split('?')[0].split('#')[0]
+            time.sleep(1)
+        return ''
 
     def _refresh_page(self):
         """Nạp lại tab Vids + đọc lại token. Sau khi đổi IP, request cũ trong trang

@@ -28,6 +28,46 @@ def list_targets(port: int) -> list[dict]:
     with urllib.request.urlopen(f'http://127.0.0.1:{port}/json', timeout=5) as r:
         return json.loads(r.read().decode('utf-8'))
 
+def create_target(port: int, url: str = 'about:blank') -> str:
+    """Mở 1 tab mới qua endpoint HTTP của DevTools — KHÔNG cần Selenium (dùng được
+    từ thread phụ). Chrome ≥111 chỉ nhận PUT; bản cũ nhận GET. Trả target id."""
+    from urllib.parse import quote
+    endpoint = f'http://127.0.0.1:{port}/json/new?{quote(url, safe=":/?=&")}'
+    last = None
+    for method in ('PUT', 'GET'):
+        try:
+            req = urllib.request.Request(endpoint, method=method)
+            with urllib.request.urlopen(req, timeout=10) as r:
+                return json.loads(r.read().decode('utf-8'))['id']
+        except Exception as e:
+            last = e
+    raise CdpError(f'Không mở được tab mới qua DevTools: {last}')
+
+
+def close_target(port: int, target_id: str):
+    try:
+        with urllib.request.urlopen(f'http://127.0.0.1:{port}/json/close/{target_id}', timeout=5):
+            pass
+    except Exception:
+        pass
+
+
+def debug_port_of(driver, fallback: int) -> int:
+    """Cổng DevTools THẬT của Chrome đang chạy. ⚠️ KHÔNG tự tính `9300 + id`:
+    `undetected_chromedriver` tự chọn cổng ngẫu nhiên, bỏ qua
+    `--remote-debugging-port` mình đặt. chromedriver ghi cổng thật vào capability
+    `goog:chromeOptions.debuggerAddress` — đọc từ đó, không có mới dùng `fallback`."""
+    try:
+        caps = driver.capabilities or {}
+        for key in ('goog:chromeOptions', 'ms:edgeOptions'):
+            addr = (caps.get(key) or {}).get('debuggerAddress') or ''
+            if ':' in addr:
+                return int(addr.rsplit(':', 1)[1])
+    except Exception:
+        pass
+    return fallback
+
+
 
 class CdpTab:
     def __init__(self, port: int, target_id: str):

@@ -25,6 +25,7 @@ from . import model_catalog
 from . import flow_models
 from .run_hours import in_run_hours, summarize_run_hours
 from .omni_lane import OmniLane, omni_enabled_for, veo_enabled_for
+from .upscale_lane import UpscaleLane
 from .chrome_utils import (
     _chrome_alive_on_port, _chrome_running_for_profile, _kill_chrome_for_profile,
     _build_chrome_options, _chrome_debug_port, _connect_to_chrome,
@@ -365,6 +366,72 @@ RECAPTCHA_FETCH_JS = """
     poll();
 """
 
+# Chặn lệnh batchexecute trang TỰ bắn để lấy token bl/f.sid/at (cài qua
+# `Page.addScriptToEvaluateOnNewDocument`). Dùng chung với `upscale_lane.py`.
+BE_INTERCEPTOR_JS = """
+(function(){
+    window.__beCalls = [];
+    function push(rec){
+        try {
+            window.__beCalls.push(rec);
+            if (window.__beCalls.length > 20) window.__beCalls.shift();
+        } catch(e) {}
+    }
+    var _origOpen = XMLHttpRequest.prototype.open;
+    var _origSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function(method, url){
+        this.__beUrl = url;
+        return _origOpen.apply(this, arguments);
+    };
+    XMLHttpRequest.prototype.send = function(body){
+        var self = this;
+        if (self.__beUrl && String(self.__beUrl).indexOf('batchexecute') !== -1) {
+            self.__beReqBody = body;
+            self.addEventListener('load', function(){
+                try {
+                    push({url: self.__beUrl, reqBody: self.__beReqBody,
+                          respBody: self.responseText, status: self.status});
+                } catch(e) {}
+            });
+        }
+        return _origSend.apply(this, arguments);
+    };
+    var _prevFetch = window.fetch;
+    window.fetch = function(input, init){
+        var url = typeof input === 'string' ? input : (input && input.url) || String(input);
+        if (String(url).indexOf('batchexecute') === -1) return _prevFetch.apply(this, arguments);
+        return _prevFetch.apply(this, arguments).then(function(resp){
+            try {
+                resp.clone().text().then(function(t){
+                    push({url: url, reqBody: init && init.body, respBody: t, status: resp.status});
+                }).catch(function(){});
+            } catch(e) {}
+            return resp;
+        });
+    };
+})();
+"""
+
+# Tự bắn 1 lệnh batchexecute. args: fReq, at, bl, sid, rpcId, done(callback).
+# Dùng chung với `upscale_lane.py`.
+BE_CALL_JS = """
+var fReq = arguments[0], at = arguments[1], bl = arguments[2], sid = arguments[3];
+var rpcId = arguments[4];
+var done = arguments[arguments.length - 1];
+var body = 'f.req=' + encodeURIComponent(fReq) + '&at=' + encodeURIComponent(at) + '&';
+var qs = new URLSearchParams({
+    rpcids: rpcId, 'source-path': location.pathname, bl: bl, 'f.sid': sid,
+    hl: 'en', _reqid: String(Math.floor(Math.random()*900000)+100000), rt: 'c'
+});
+fetch('https://flow.google.com/_/AiSandboxAngularFrontend/data/batchexecute?' + qs.toString(), {
+    method: 'POST', credentials: 'include',
+    headers: {'content-type': 'application/x-www-form-urlencoded;charset=UTF-8'},
+    body: body
+}).then(function(r){
+    return r.text().then(function(t){ done({ok:true, status:r.status, body:t}); });
+}).catch(function(e){ done({ok:false, error:String(e)}); });
+"""
+
 
 
 
@@ -409,6 +476,7 @@ class SeleniumFlowWorker:
         self.machine_code = f'selenium-{profile["id"]}'
         # (2026-09-27) Làn Omni On Workspace chạy kèm VEO — xem server/omni_lane.py
         self._omni = None
+        self._upscale_lane = None     # làn upscale 1080p chạy song song (upscale_lane.py)
         self._omni_relogin_at = 0.0
         self.worker_mode = profile.get('worker_mode') or 'api'
         if self.worker_mode not in ('api', 'dom', 'gemini', 'chatgpt', 'gemini_video', 'gemini_image'):
@@ -2628,49 +2696,7 @@ class SeleniumFlowWorker:
         if not getattr(self, '_be_interceptor_installed', False):
             try:
                 self._cdp('Page.enable', {})
-                self._cdp('Page.addScriptToEvaluateOnNewDocument', {'source': """
-                    (function(){
-                        window.__beCalls = [];
-                        function push(rec){
-                            try {
-                                window.__beCalls.push(rec);
-                                if (window.__beCalls.length > 20) window.__beCalls.shift();
-                            } catch(e) {}
-                        }
-                        var _origOpen = XMLHttpRequest.prototype.open;
-                        var _origSend = XMLHttpRequest.prototype.send;
-                        XMLHttpRequest.prototype.open = function(method, url){
-                            this.__beUrl = url;
-                            return _origOpen.apply(this, arguments);
-                        };
-                        XMLHttpRequest.prototype.send = function(body){
-                            var self = this;
-                            if (self.__beUrl && String(self.__beUrl).indexOf('batchexecute') !== -1) {
-                                self.__beReqBody = body;
-                                self.addEventListener('load', function(){
-                                    try {
-                                        push({url: self.__beUrl, reqBody: self.__beReqBody,
-                                              respBody: self.responseText, status: self.status});
-                                    } catch(e) {}
-                                });
-                            }
-                            return _origSend.apply(this, arguments);
-                        };
-                        var _prevFetch = window.fetch;
-                        window.fetch = function(input, init){
-                            var url = typeof input === 'string' ? input : (input && input.url) || String(input);
-                            if (String(url).indexOf('batchexecute') === -1) return _prevFetch.apply(this, arguments);
-                            return _prevFetch.apply(this, arguments).then(function(resp){
-                                try {
-                                    resp.clone().text().then(function(t){
-                                        push({url: url, reqBody: init && init.body, respBody: t, status: resp.status});
-                                    }).catch(function(){});
-                                } catch(e) {}
-                                return resp;
-                            });
-                        };
-                    })();
-                """})
+                self._cdp('Page.addScriptToEvaluateOnNewDocument', {'source': BE_INTERCEPTOR_JS})
                 self._be_interceptor_installed = True
             except Exception as e:
                 self._log('warn', f'batchexecute: không cài được interceptor: {e}')
@@ -2719,23 +2745,8 @@ class SeleniumFlowWorker:
         mạng/timeout/status khác 200."""
         inner_args = json.dumps(args)
         f_req = json.dumps([[[rpc_id, inner_args, None, 'generic']]])
-        result = self._js_async("""
-            var fReq = arguments[0], at = arguments[1], bl = arguments[2], sid = arguments[3];
-            var rpcId = arguments[4];
-            var done = arguments[arguments.length - 1];
-            var body = 'f.req=' + encodeURIComponent(fReq) + '&at=' + encodeURIComponent(at) + '&';
-            var qs = new URLSearchParams({
-                rpcids: rpcId, 'source-path': location.pathname, bl: bl, 'f.sid': sid,
-                hl: 'en', _reqid: String(Math.floor(Math.random()*900000)+100000), rt: 'c'
-            });
-            fetch('https://flow.google.com/_/AiSandboxAngularFrontend/data/batchexecute?' + qs.toString(), {
-                method: 'POST', credentials: 'include',
-                headers: {'content-type': 'application/x-www-form-urlencoded;charset=UTF-8'},
-                body: body
-            }).then(function(r){
-                return r.text().then(function(t){ done({ok:true, status:r.status, body:t}); });
-            }).catch(function(e){ done({ok:false, error:String(e)}); });
-        """, f_req, session['at'], session['bl'], session['sid'], rpc_id, timeout=timeout)
+        result = self._js_async(BE_CALL_JS, f_req, session['at'], session['bl'],
+                                session['sid'], rpc_id, timeout=timeout)
         if not result or not result.get('ok'):
             self._log('warn', f'batchexecute: gọi RPC "{rpc_id}" lỗi: '
                                f'{result.get("error") if result else "no response"}')
@@ -8837,7 +8848,11 @@ class SeleniumFlowWorker:
                 body['keepaliveOnly'] = True
             # (2026-09-29) Nhận việc upscale 1080p video đã render trong Flow
             # (chỉ VEO dom/api — media nằm trong project Flow của tài khoản này).
-            if self.worker_mode in ('dom', 'api') and not keepalive_only:
+            # (2026-09-30) Làn upscale chạy song song — nhận cả lúc đang render lô
+            # video (keepalive), chỉ không nhận khi ngoài giờ / đang bị Google chặn.
+            up_lane = getattr(self, '_upscale_lane', None)
+            if (self.worker_mode in ('dom', 'api') and up_lane
+                    and not outside_hours and up_lane.can_accept()):
                 body['acceptUpscale'] = True
             # (2026-09-14) Chạy theo project + email — backend chỉ giao task của
             # project gán đúng email này (xem heartbeat.py `binding_clause`).
@@ -8845,10 +8860,10 @@ class SeleniumFlowWorker:
                 body['bindProjectEmail'] = True
                 body['accountEmail'] = (profile.get('account_email') or '').strip()
             r = self._req('POST', f'{FLOW_SERVER}/api/media/heartbeat', quiet=True, body=body) or {}
+            self._queue_upscale_jobs(r.get('upscaleJobs') or [])
             if outside_hours:
                 return []
             tasks = r.get('tasks') or ([r['task']] if r.get('task') else [])
-            self._queue_upscale_jobs(r.get('upscaleJobs') or [])
             if tasks:
                 ids = ', '.join(f'#{t.get("id")}' for t in tasks)
                 if keepalive_only:
@@ -8871,171 +8886,17 @@ class SeleniumFlowWorker:
     #   → POST /api/media/task/<id>/upscale_result (server thay file 720p).
     # Các lần GỬI cách nhau `upscale_gap_secs` (mặc định 10s) theo yêu cầu user.
 
-    _UPSCALE_POLL_SECS = 10
-    _UPSCALE_TIMEOUT_SECS = 900
-
     def _queue_upscale_jobs(self, jobs: list):
-        if not jobs:
-            return
-        q = self.__dict__.setdefault('_upscale_jobs', [])
-        have = {j.get('taskId') for j in q}
-        new = [j for j in jobs if j.get('taskId') and j['taskId'] not in have]
-        if new:
-            q.extend(new)
-            self._log('info', f'← Nhận {len(new)} việc upscale 1080p: '
-                              + ', '.join(f"#{j['taskId']}" for j in new))
+        """Chuyển việc upscale cho làn chạy song song (`upscale_lane.py`)."""
+        lane = getattr(self, '_upscale_lane', None)
+        if jobs and lane:
+            lane.add_jobs(jobs)
 
-    def _report_upscale(self, task_id, **body):
-        try:
-            self._req('POST', f'{FLOW_SERVER}/api/media/task/{task_id}/upscale_result',
-                      body={'machineCode': self.machine_code, **body})
-        except Exception as e:
-            self._log('warn', f'upscale #{task_id}: gửi kết quả về server lỗi: {e}')
-
-    def _flow_tile_ids(self, project_id: str, session: dict) -> dict:
-        """uuid media (meta[4]) → tile id (entry[0]) trong project Flow — p0UkFb cần cả 2."""
-        raw = self._batchexecute_call('Zzl0ze', [f'projects/{project_id}', None, None, None, [1]], session)
-        data = self._batchexecute_parse(raw, 'Zzl0ze') if raw else None
-        out = {}
-        for entry in (((data or [None, []])[1]) or []):
-            try:
-                meta = entry[3]
-                if isinstance(meta, list) and len(meta) > 4 and meta[4]:
-                    out[meta[4]] = entry[0]
-            except Exception:
-                continue
-        return out
-
-    def _process_upscale_jobs(self):
-        jobs, self._upscale_jobs = list(self._upscale_jobs), []
-        if not jobs or self._stop.is_set():
-            return
-        self._upscale_busy = True
-        try:
-            groups = {}
-            for j in jobs:
-                groups.setdefault(str(j.get('flowProjectId') or '').lower(), []).append(j)
-            for fid, group in groups.items():
-                self._process_upscale_group(fid, group)
-        except Exception as e:
-            self._log('error', f'Upscale lỗi: {e}')
-            for j in jobs:
-                if not j.get('_reported'):
-                    self._report_upscale(j['taskId'], error=f'Lỗi worker: {e}')
-        finally:
-            self._upscale_busy = False
-            # Trả trình duyệt về đúng project của profile nếu vừa đi project khác
-            try:
-                own = self._extract_project_id() or ''
-                if own and self._project_id_from_url(self.driver.current_url or '') != own:
-                    self._return_to_saved_project()
-            except Exception:
-                pass
-
-    def _process_upscale_group(self, fid: str, jobs: list):
-        def fail(j, msg):
-            j['_reported'] = True
-            self._log('warn', f'✗ Upscale #{j["taskId"]} {j.get("nameId") or ""}: {msg}')
-            self._report_upscale(j['taskId'], error=msg)
-
-        # Media nằm trong project Flow `fid` — phải đứng đúng project đó mới gọi được.
-        cur_pid = self._project_id_from_url(self.driver.current_url or '')
-        if fid and cur_pid != fid:
-            self._nav_get(f'https://flow.google.com/project/{fid}', 'upscale: vào project Flow chứa video')
-            self._sleep(6)
-            cur_pid = self._project_id_from_url(self.driver.current_url or '')
-            if cur_pid != fid:
-                for j in jobs:
-                    fail(j, f'không vào được project Flow {fid}')
-                return
-            self._be_session_cache = None
-        project_id = fid or cur_pid
-        session = self._be_session()
-        if not session:
-            for j in jobs:
-                fail(j, 'không lấy được session batchexecute')
-            return
-        tiles = self._flow_tile_ids(project_id, session)
-        gap = float(self._server_settings.get('upscale_gap_secs', 10) or 10)
-
-        running = []              # (job, upsampled_name, t0)
-        for i, j in enumerate(jobs):
-            if self._stop.is_set():
-                break
-            if i:
-                self._log('info', f'⏳ Chờ {gap:.0f}s trước lần upscale kế tiếp')
-                self._stop.wait(gap)
-            name = j.get('name') or ''
-            tile = tiles.get(name)
-            if not tile:
-                fail(j, f'không tìm thấy video {name[:8]}… trong project Flow (đã bị xoá?)')
-                continue
-            try:
-                captcha = self._get_fresh_recaptcha('VIDEO_GENERATION')
-                if not captcha:
-                    fail(j, 'không lấy được reCAPTCHA')
-                    continue
-                args = flow_be.build_upsample_video_args(
-                    project_id, captcha, name, tile, aspect_ratio=j.get('aspectRatio') or '16:9',
-                    model_key=flow_be.UPSAMPLE_MODEL_KEYS['1080p'])
-                self._log('info', f'▶ Upscale 1080p #{j["taskId"]} {j.get("nameId") or ""} '
-                                  f'(POST {flow_be.RPC_UPSAMPLE_VIDEO})')
-                raw = self._batchexecute_call(flow_be.RPC_UPSAMPLE_VIDEO, args, session, timeout=60)
-                payload = self._batchexecute_parse(raw, flow_be.RPC_UPSAMPLE_VIDEO) if raw else None
-                up_name = flow_be.parse_upsample_result(payload) if payload else ''
-                if not up_name:
-                    fail(j, f'Flow không nhận lệnh upscale — {str(raw)[:160]}')
-                    continue
-                running.append((j, up_name, time.time()))
-            except Exception as e:
-                fail(j, f'gửi lệnh upscale lỗi: {getattr(e, "reason", e)}')
-
-        last_ka = time.time()
-        while running and not self._stop.is_set():
-            self._stop.wait(self._UPSCALE_POLL_SECS)
-            if time.time() - last_ka >= POLL_INTERVAL:
-                self._heartbeat(keepalive_only=True)
-                last_ka = time.time()
-            try:
-                raw = self._batchexecute_call(flow_be.RPC_CHECK_VIDEO_STATUS,
-                                              [None, None, [[n] for _, n, _ in running]], session)
-                payload = self._batchexecute_parse(raw, flow_be.RPC_CHECK_VIDEO_STATUS) if raw else None
-            except Exception as e:
-                self._log('warn', f'upscale: poll trạng thái lỗi: {e}')
-                continue
-            still = []
-            for j, up_name, t0 in running:
-                st = flow_be.parse_video_status(payload, up_name) if payload else None
-                if st == 3:
-                    self._finish_upscale(j, up_name, session)
-                elif st in (None, 1, 2):
-                    if time.time() - t0 < self._UPSCALE_TIMEOUT_SECS:
-                        still.append((j, up_name, t0))
-                    else:
-                        fail(j, f'quá {self._UPSCALE_TIMEOUT_SECS}s chưa upscale xong')
-                else:
-                    fail(j, f'Flow báo upscale lỗi (trạng thái {st})')
-            running = still
-        for j, _, _ in running:
-            fail(j, 'worker dừng giữa lúc upscale')
-
-    def _finish_upscale(self, j: dict, up_name: str, session: dict):
-        j['_reported'] = True
-        try:
-            raw = self._batchexecute_call('as29s', [up_name], session)
-            data = self._batchexecute_parse(raw, 'as29s') if raw else None
-            url = flow_be.find_video_url(data) if data else ''
-            if not url:
-                raise RuntimeError('không lấy được URL bản 1080p')
-            r = self._req('POST', f'{FLOW_SERVER}/api/media/task/{j["taskId"]}/upscale_result',
-                          body={'machineCode': self.machine_code, 'name': j.get('name'),
-                                'upscaledName': up_name, 'url': url, 'resolution': '1080p'})
-            if isinstance(r, dict) and r.get('success') is False:
-                raise RuntimeError(r.get('error') or 'server không lưu được bản 1080p')
-            self._log('ok', f'✔ Upscale 1080p xong #{j["taskId"]} {j.get("nameId") or ""}')
-        except Exception as e:
-            self._log('warn', f'✗ Upscale #{j["taskId"]}: {e}')
-            self._report_upscale(j['taskId'], error=str(e))
+    @property
+    def _upscale_busy(self) -> bool:
+        """Dispatcher đọc để không đóng profile khi làn upscale còn việc."""
+        lane = getattr(self, '_upscale_lane', None)
+        return bool(lane and lane.busy)
 
     # ── Worker main loop ──────────────────────────────────────────────────────
 
@@ -9092,6 +8953,13 @@ class SeleniumFlowWorker:
                     if lane.start():
                         self._omni = lane
 
+                # (2026-09-30) Làn upscale 1080p chạy song song vòng task video.
+                # Tạo ở luồng chính SAU OmniLane (driver đã quay về tab VEO).
+                try:
+                    self._upscale_lane = UpscaleLane(self)
+                except Exception as e:
+                    self._log('warn', f'Không khởi tạo được làn upscale: {e}')
+
             while not self._stop.is_set():
                 # Kiểm tra browser còn sống TRƯỚC KHI heartbeat
                 # Nếu user đóng Chrome thủ công → thoát ngay, không nhận task
@@ -9122,9 +8990,7 @@ class SeleniumFlowWorker:
                         if self._process_tasks(tasks):
                             self._log('warn', 'Profile chuyển sang trạng thái ngủ — thoát worker loop')
                             break
-                    if getattr(self, '_upscale_jobs', None):
-                        self._process_upscale_jobs()
-                    elif not tasks:
+                    if not tasks:
                         self._stop.wait(POLL_INTERVAL)
                 except Exception as e:
                     self._log('error', f'Worker loop: {e}')
@@ -9151,6 +9017,8 @@ class SeleniumFlowWorker:
         finally:
             if self._omni:
                 self._omni.stop()
+            if getattr(self, '_upscale_lane', None):
+                self._upscale_lane.stop()
             if self.driver:
                 try:
                     self.driver.quit()
