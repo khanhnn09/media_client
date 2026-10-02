@@ -150,6 +150,7 @@ _DEFAULT_SERVER_SETTINGS = {
     # 2026-09-24: mở trình duyệt bằng CloakBrowser (luồng riêng server/cloak_browser.py)
     'use_cloakbrowser': 0,
     'cloak_geoip':      1,   # = launch(geoip=True): múi giờ + ngôn ngữ + WebRTC theo IP proxy
+    'cloak_rotate_fp_on_block': 0,   # Google chặn (PUBLIC_ERROR_...) → đổi fingerprint Cloak của profile
     'cloak_humanize':   1,   # = launch(humanize=True): chuột Bezier + nhịp gõ phím người thật
     # (2026-08-20) Bậc thang escalation THEO BATCH — theo yêu cầu user: "Nếu batch
     # gửi lên 5 task 1 lúc mà thành công 1 vẫn tính batch thành công -> nhưng nếu

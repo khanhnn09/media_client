@@ -24,7 +24,7 @@ BOOL_KEYS = (
     'quiet_hours_enabled',
     'gemini_send_via_rpc', 'google_login_check_enabled',
     'bind_tasks_to_project_email', 'api_fallback_to_dom', 'use_cloakbrowser',
-    'cloak_geoip', 'cloak_humanize', 'batch_sleep_wipe_cookies',
+    'cloak_geoip', 'cloak_humanize', 'cloak_rotate_fp_on_block', 'batch_sleep_wipe_cookies',
 )
 
 _TRUE_STR  = {'1', 'true', 'yes', 'on', 'bật', 'bat'}

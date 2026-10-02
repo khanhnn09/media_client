@@ -796,6 +796,7 @@ class SeleniumFlowWorker:
                 except Exception:
                     pass
                 self._install_recaptcha_guard(driver)
+                self._install_chrome_fingerprint(driver)
                 return driver
             self._log('warn', 'Attach thất bại — fallback mở Chrome mới')
 
@@ -930,7 +931,25 @@ class SeleniumFlowWorker:
         except Exception:
             pass
         self._install_recaptcha_guard(driver)
+        self._install_chrome_fingerprint(driver)
         return driver
+
+    def _install_chrome_fingerprint(self, driver) -> None:
+        """(2026-10-03) Chrome thường: nếu profile đã bị đổi fingerprint (đời > 0,
+        do `cloak_rotate_fp_on_block`) thì chèn bản vá theo seed — phần cứng ảo +
+        nhiễu canvas/âm thanh. UA, platform, WebGL giữ NGUYÊN của máy thật để không
+        lệch nhau (lệch làm điểm reCAPTCHA tệ hơn). Đời 0 = không đụng gì."""
+        try:
+            if not int(self._server_settings.get('cloak_rotate_fp_on_block', 0) or 0):
+                return
+            from .cloak_browser import fingerprint_patch_js
+            js = fingerprint_patch_js(self.profile_id)
+            if not js:
+                return
+            driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {'source': js})
+            self._log('info', 'Đã áp fingerprint Chrome (đời đã đổi do bị chặn)')
+        except Exception as e:
+            self._log('warn', f'Không áp được fingerprint Chrome: {e}')
 
     def _install_recaptcha_guard(self, driver) -> None:
         """Cài `RECAPTCHA_GUARD_JS` cho MỌI lần load trang sau này. Trang đang mở
@@ -7955,6 +7974,23 @@ class SeleniumFlowWorker:
         self._log('error', f'⛔ Google chặn tài khoản ({str(reason)[:160]}) — lần {level + 1} liên '
                            f'tiếp. Nghỉ tạo mới {secs}s, task trả về hàng chờ KHÔNG trừ lượt '
                            f'thử lại; sau đó giãn nhịp gửi.')
+        self._rotate_fingerprint_on_block()
+
+    def _rotate_fingerprint_on_block(self) -> None:
+        """(2026-10-03) Bật `cloak_rotate_fp_on_block` + đang dùng CloakBrowser:
+        đổi seed fingerprint của profile rồi dừng worker (đóng Chrome). Worker mới
+        mở lại sau khi hết nghỉ sẽ dùng fingerprint mới. Cookie/đăng nhập giữ nguyên."""
+        try:
+            if not int(self._server_settings.get('cloak_rotate_fp_on_block', 0) or 0):
+                return
+            from .cloak_browser import cloak_enabled, bump_fingerprint_epoch
+            n = bump_fingerprint_epoch(self.profile_id)
+            kind = 'CloakBrowser' if cloak_enabled() else 'Chrome'
+            self._log('warn', f'🔀 Đổi fingerprint {kind} (đời #{n}) — đóng trình duyệt, '
+                              f'lần mở sau dùng fingerprint mới')
+            self._stop.set()
+        except Exception as e:
+            self._log('warn', f'Đổi fingerprint lỗi: {e}')
 
     def _release_task(self, task_id, reason: str) -> bool:
         """Trả task về hàng chờ (không trừ retry_count, hoãn). False = không

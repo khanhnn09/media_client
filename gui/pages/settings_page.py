@@ -44,6 +44,10 @@ _TABS = [
          'Áp dụng khi mở trình duyệt kế tiếp (Stop rồi Start profile).'),
         ('cloak_geoip',                    'Cloak: geoip', 'bool',
          'Khớp múi giờ + ngôn ngữ + IP WebRTC theo IP ra của proxy (như launch(geoip=True)).'),
+        ('cloak_rotate_fp_on_block',       'Đổi fingerprint khi bị chặn (Cloak + Chrome)', 'bool',
+         'Khi Google trả lỗi PUBLIC_ERROR_UNUSUAL_ACTIVITY / USER_REQUESTS_THROTTLED: đổi seed '
+         'fingerprint của profile, đóng trình duyệt; lần mở kế tiếp dùng fingerprint mới. '
+         'Cloak: đổi seed fingerprint. Chrome thường: vá phần cứng ảo + nhiễu canvas (UA/WebGL giữ nguyên).'),
         ('cloak_humanize',                 'Cloak: humanize', 'bool',
          'Chuột đi đường cong, gõ phím theo nhịp người thật khi thao tác giao diện (như launch(humanize=True)).'),
     ]),

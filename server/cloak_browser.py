@@ -27,8 +27,10 @@ Cấu hình tương đương demo của thư viện:
 
 from __future__ import annotations
 
+import json
 import os
 import random
+import threading
 import time
 import zlib
 from pathlib import Path
@@ -151,8 +153,61 @@ def _resolve_geo(proxy_url: str | None) -> tuple:
     return res
 
 
+_FP_EPOCH_FILE = Path(__file__).parent.parent / 'cloak_fp_epoch.json'
+_fp_lock = threading.Lock()
+
+
+def _load_fp_epochs() -> dict:
+    try:
+        return json.loads(_FP_EPOCH_FILE.read_text(encoding='utf-8'))
+    except Exception:
+        return {}
+
+
+def bump_fingerprint_epoch(profile_id) -> int:
+    """(2026-10-03) Đổi fingerprint của profile: tăng "đời" seed, lần mở trình
+    duyệt kế tiếp dùng seed mới. Dùng khi Google chặn (PUBLIC_ERROR_...)."""
+    with _fp_lock:
+        d = _load_fp_epochs()
+        n = int(d.get(str(profile_id), 0)) + 1
+        d[str(profile_id)] = n
+        try:
+            _FP_EPOCH_FILE.write_text(json.dumps(d), encoding='utf-8')
+        except Exception as e:
+            log.warning(f'[cloak] không lưu được epoch fingerprint: {e}')
+        return n
+
+
+def fingerprint_patch_js(profile_id) -> str:
+    """JS vá fingerprint cho Chrome thường theo đời của profile. Rỗng nếu đời 0."""
+    epoch = int(_load_fp_epochs().get(str(profile_id), 0))
+    if not epoch:
+        return ''
+    rnd = random.Random(zlib.crc32(f'toolsub-chrome-fp-{profile_id}-{epoch}'.encode()))
+    cores = rnd.choice([4, 6, 8, 12, 16])
+    mem = rnd.choice([4, 8, 8, 16])
+    seed = rnd.randint(1, 2 ** 31 - 1)
+    return """(()=>{
+const S=%d;let x=S;const rn=()=>{x=(x*1664525+1013904223)>>>0;return x/4294967296};
+try{Object.defineProperty(navigator,'hardwareConcurrency',{get:()=>%d})}catch(e){}
+try{Object.defineProperty(navigator,'deviceMemory',{get:()=>%d})}catch(e){}
+const gid=CanvasRenderingContext2D.prototype.getImageData;
+CanvasRenderingContext2D.prototype.getImageData=function(a,b,c,d){
+ const r=gid.call(this,a,b,c,d);const n=r.data.length;
+ for(let i=0;i<8;i++){const k=(Math.floor(rn()*n)>>2<<2);r.data[k]=(r.data[k]+(rn()<.5?1:-1))&255}
+ return r};
+const tdu=HTMLCanvasElement.prototype.toDataURL;
+HTMLCanvasElement.prototype.toDataURL=function(){
+ try{const c=this.getContext('2d');if(c&&this.width&&this.height){
+  const im=gid.call(c,0,0,1,1);im.data[0]=(im.data[0]+1)&255;c.putImageData(im,0,0)}}catch(e){}
+ return tdu.apply(this,arguments)};
+})();""" % (seed, cores, mem)
+
+
 def _fingerprint_seed(profile_id) -> int:
-    return 10000 + zlib.crc32(f'toolsub-cloak-{profile_id}'.encode()) % 90000
+    epoch = int(_load_fp_epochs().get(str(profile_id), 0))
+    tag = f'toolsub-cloak-{profile_id}' + (f'-{epoch}' if epoch else '')
+    return 10000 + zlib.crc32(tag.encode()) % 90000
 
 
 # ── Dựng ChromeOptions ───────────────────────────────────────────────────────
