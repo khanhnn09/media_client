@@ -69,6 +69,7 @@ def create_profile():
             run_hours                   = d.get('run_hours', ''),
             omni_enabled                = d.get('omni_enabled', 0),
             veo_enabled                 = d.get('veo_enabled', 1),
+            fp_aspects                  = d.get('fp_aspects', ''),
         )
         return jsonify({'id': new_id, 'ok': True})
     except Exception as e:

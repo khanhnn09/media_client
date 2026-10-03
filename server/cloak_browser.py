@@ -156,41 +156,141 @@ def _resolve_geo(proxy_url: str | None) -> tuple:
 _FP_EPOCH_FILE = Path(__file__).parent.parent / 'cloak_fp_epoch.json'
 _fp_lock = threading.Lock()
 
+# (2026-10-03) Các MỤC fingerprint có thể đổi khi Google chặn — user chọn mục nào
+# trong hộp thoại profile (cờ cục bộ `fp_aspects`, rỗng/None = đổi TẤT CẢ).
+# Mỗi mục có "đời" riêng: đổi mục nào thì chỉ đời của mục đó tăng.
+#   seed     : CloakBrowser --fingerprint (đổi cả bộ canvas/audio/WebGL/font nội bộ)
+#   hardware : số nhân CPU + RAM báo cho trang
+#   window   : kích thước cửa sổ trình duyệt
+#   canvas / audio / webgl : nhiễu nhỏ (Chrome thường — Cloak đã gồm trong seed)
+#   languages: thứ tự navigator.languages (Chrome thường)
+FP_ASPECTS = {
+    'seed':      'Seed CloakBrowser (canvas/audio/WebGL/font nội bộ)',
+    'hardware':  'Phần cứng ảo (số nhân CPU, RAM)',
+    'window':    'Kích thước cửa sổ',
+    'canvas':    'Nhiễu canvas (Chrome thường)',
+    'audio':     'Nhiễu âm thanh (Chrome thường)',
+    'webgl':     'Nhiễu WebGL (Chrome thường)',
+    'languages': 'Danh sách ngôn ngữ (Chrome thường)',
+}
+_CLOAK_ASPECTS = ('seed', 'hardware', 'window')
+_CHROME_ASPECTS = ('hardware', 'window', 'canvas', 'audio', 'webgl', 'languages')
+
+
+def parse_fp_aspects(value) -> list:
+    """CSV/list → danh sách mục hợp lệ; rỗng/None = tất cả."""
+    if isinstance(value, str):
+        value = [x.strip() for x in value.split(',')]
+    got = [x for x in (value or []) if x in FP_ASPECTS]
+    return got or list(FP_ASPECTS)
+
 
 def _load_fp_epochs() -> dict:
+    """{pid: {aspect: đời}}. File cũ dạng {pid: số} = mọi mục cùng đời đó."""
     try:
-        return json.loads(_FP_EPOCH_FILE.read_text(encoding='utf-8'))
+        raw = json.loads(_FP_EPOCH_FILE.read_text(encoding='utf-8'))
     except Exception:
         return {}
+    out = {}
+    for pid, v in raw.items():
+        out[pid] = ({a: int(v) for a in FP_ASPECTS} if isinstance(v, int)
+                    else {a: int((v or {}).get(a, 0)) for a in FP_ASPECTS})
+    return out
 
 
-def bump_fingerprint_epoch(profile_id) -> int:
-    """(2026-10-03) Đổi fingerprint của profile: tăng "đời" seed, lần mở trình
-    duyệt kế tiếp dùng seed mới. Dùng khi Google chặn (PUBLIC_ERROR_...)."""
+def _epoch(profile_id, aspect) -> int:
+    return int(_load_fp_epochs().get(str(profile_id), {}).get(aspect, 0))
+
+
+_WIN_SIZES = [(1280, 720), (1366, 768), (1440, 900), (1536, 864), (1600, 900),
+              (1680, 1050), (1920, 1080)]
+_LANGS = [['en-US', 'en'], ['en-US', 'en', 'vi'], ['vi-VN', 'vi', 'en-US', 'en'],
+          ['en-GB', 'en'], ['vi', 'en-US', 'en']]
+
+
+def aspect_value(profile_id, aspect, epoch=None):
+    """Giá trị của 1 mục ở 1 đời (đời 0 = None: để nguyên của máy thật)."""
+    n = _epoch(profile_id, aspect) if epoch is None else epoch
+    if not n:
+        return None
+    rnd = random.Random(zlib.crc32(f'toolsub-fp-{profile_id}-{aspect}-{n}'.encode()))
+    if aspect == 'seed':
+        return 10000 + rnd.randint(0, 89999)
+    if aspect == 'hardware':
+        return {'cores': rnd.choice([4, 6, 8, 12, 16]), 'mem': rnd.choice([4, 8, 8, 16])}
+    if aspect == 'window':
+        w, h = rnd.choice(_WIN_SIZES)
+        return {'w': w, 'h': h}
+    if aspect == 'languages':
+        return rnd.choice(_LANGS)
+    return rnd.randint(1, 2 ** 31 - 1)       # canvas / audio / webgl: seed nhiễu
+
+
+def describe_value(aspect, v) -> str:
+    if v is None:
+        return 'mặc định máy thật'
+    if aspect == 'hardware':
+        return f"{v['cores']} nhân / {v['mem']}GB"
+    if aspect == 'window':
+        return f"{v['w']}x{v['h']}"
+    if aspect == 'languages':
+        return ','.join(v)
+    if aspect == 'seed':
+        return f'seed {v}'
+    return f'nhiễu #{v}'
+
+
+def rotate_fingerprint(profile_id, aspects, cloak: bool) -> list:
+    """Đổi các mục đã chọn sang đời kế tiếp. Trả danh sách dòng mô tả để ghi log
+    ("Nhãn: cũ → mới" hoặc lý do bỏ qua)."""
+    applicable = _CLOAK_ASPECTS if cloak else _CHROME_ASPECTS
+    lines = []
     with _fp_lock:
         d = _load_fp_epochs()
-        n = int(d.get(str(profile_id), 0)) + 1
-        d[str(profile_id)] = n
+        cur = d.setdefault(str(profile_id), {a: 0 for a in FP_ASPECTS})
+        for a in parse_fp_aspects(aspects):
+            if a not in applicable:
+                why = ('đã nằm trong seed của CloakBrowser' if cloak
+                       else 'chỉ dùng cho CloakBrowser')
+                lines.append(f'{FP_ASPECTS[a]}: bỏ qua ({why})')
+                continue
+            old = aspect_value(profile_id, a, cur[a])
+            cur[a] += 1
+            new = aspect_value(profile_id, a, cur[a])
+            lines.append(f'{FP_ASPECTS[a]}: {describe_value(a, old)} → {describe_value(a, new)}')
         try:
             _FP_EPOCH_FILE.write_text(json.dumps(d), encoding='utf-8')
         except Exception as e:
             log.warning(f'[cloak] không lưu được epoch fingerprint: {e}')
-        return n
+    return lines
+
+
+def current_fingerprint_lines(profile_id, cloak: bool) -> list:
+    """Giá trị fingerprint đang áp (chỉ các mục đã từng đổi) — để ghi log lúc mở."""
+    out = []
+    for a in (_CLOAK_ASPECTS if cloak else _CHROME_ASPECTS):
+        v = aspect_value(profile_id, a)
+        if v is not None:
+            out.append(f'{FP_ASPECTS[a]}: {describe_value(a, v)}')
+    return out
 
 
 def fingerprint_patch_js(profile_id) -> str:
-    """JS vá fingerprint cho Chrome thường theo đời của profile. Rỗng nếu đời 0."""
-    epoch = int(_load_fp_epochs().get(str(profile_id), 0))
-    if not epoch:
-        return ''
-    rnd = random.Random(zlib.crc32(f'toolsub-chrome-fp-{profile_id}-{epoch}'.encode()))
-    cores = rnd.choice([4, 6, 8, 12, 16])
-    mem = rnd.choice([4, 8, 8, 16])
-    seed = rnd.randint(1, 2 ** 31 - 1)
-    return """(()=>{
-const S=%d;let x=S;const rn=()=>{x=(x*1664525+1013904223)>>>0;return x/4294967296};
-try{Object.defineProperty(navigator,'hardwareConcurrency',{get:()=>%d})}catch(e){}
-try{Object.defineProperty(navigator,'deviceMemory',{get:()=>%d})}catch(e){}
+    """JS vá fingerprint cho Chrome thường theo đời từng mục. Rỗng nếu chưa đổi gì.
+    (CPU/cửa sổ đi qua CDP chính thống — xem `apply_cdp_overrides`.)"""
+    parts = []
+    hw = aspect_value(profile_id, 'hardware')
+    if hw:
+        parts.append("try{Object.defineProperty(navigator,'deviceMemory',{get:()=>%d})}catch(e){}"
+                     % hw['mem'])
+    lg = aspect_value(profile_id, 'languages')
+    if lg:
+        parts.append("try{Object.defineProperty(navigator,'languages',{get:()=>%s});"
+                     "Object.defineProperty(navigator,'language',{get:()=>%s})}catch(e){}"
+                     % (json.dumps(lg), json.dumps(lg[0])))
+    cv = aspect_value(profile_id, 'canvas')
+    if cv:
+        parts.append("""(()=>{let x=%d;const rn=()=>{x=(x*1664525+1013904223)>>>0;return x/4294967296};
 const gid=CanvasRenderingContext2D.prototype.getImageData;
 CanvasRenderingContext2D.prototype.getImageData=function(a,b,c,d){
  const r=gid.call(this,a,b,c,d);const n=r.data.length;
@@ -200,14 +300,58 @@ const tdu=HTMLCanvasElement.prototype.toDataURL;
 HTMLCanvasElement.prototype.toDataURL=function(){
  try{const c=this.getContext('2d');if(c&&this.width&&this.height){
   const im=gid.call(c,0,0,1,1);im.data[0]=(im.data[0]+1)&255;c.putImageData(im,0,0)}}catch(e){}
- return tdu.apply(this,arguments)};
-})();""" % (seed, cores, mem)
+ return tdu.apply(this,arguments)}})();""" % cv)
+    au = aspect_value(profile_id, 'audio')
+    if au:
+        parts.append("""(()=>{let x=%d;const rn=()=>{x=(x*1664525+1013904223)>>>0;return x/4294967296};
+const gcd=AudioBuffer.prototype.getChannelData;
+AudioBuffer.prototype.getChannelData=function(){const d=gcd.apply(this,arguments);
+ if(!this.__fp){this.__fp=1;for(let i=0;i<d.length;i+=Math.max(1,(d.length/16)|0)){d[i]+=(rn()-.5)*1e-7}}
+ return d}})();""" % au)
+    wg = aspect_value(profile_id, 'webgl')
+    if wg:
+        parts.append("""(()=>{let x=%d;const rn=()=>{x=(x*1664525+1013904223)>>>0;return x/4294967296};
+for(const C of [WebGLRenderingContext,self.WebGL2RenderingContext]){if(!C)continue;
+ const rp=C.prototype.readPixels;
+ C.prototype.readPixels=function(){const r=rp.apply(this,arguments);
+  const buf=arguments[6];if(buf&&buf.length){const k=Math.floor(rn()*buf.length);buf[k]=(buf[k]+1)&255}return r}}})();""" % wg)
+    if not parts:
+        return ''
+    return '(()=>{' + '\n'.join(parts) + '})();'
+
+
+def apply_cdp_overrides(driver, profile_id, log_fn=None) -> list:
+    """Phần đổi được bằng CDP chính thống (không vá JS): số nhân CPU, kích thước
+    cửa sổ. Dùng cho CẢ CloakBrowser và Chrome thường. Trả danh sách mục đã áp."""
+    done = []
+    hw = aspect_value(profile_id, 'hardware')
+    if hw:
+        try:
+            driver.execute_cdp_cmd('Emulation.setHardwareConcurrencyOverride',
+                                   {'hardwareConcurrency': hw['cores']})
+            done.append(f"CPU {hw['cores']} nhân")
+        except Exception as e:
+            if log_fn:
+                log_fn('warn', f'Không áp được số nhân CPU: {e}')
+    win = aspect_value(profile_id, 'window')
+    if win:
+        try:
+            wid = driver.execute_cdp_cmd('Browser.getWindowForTarget', {}).get('windowId')
+            driver.execute_cdp_cmd('Browser.setWindowBounds', {
+                'windowId': wid, 'bounds': {'windowState': 'normal', 'width': win['w'],
+                                            'height': win['h'], 'left': 20, 'top': 20}})
+            done.append(f"cửa sổ {win['w']}x{win['h']}")
+        except Exception as e:
+            if log_fn:
+                log_fn('warn', f'Không đổi được kích thước cửa sổ: {e}')
+    return done
 
 
 def _fingerprint_seed(profile_id) -> int:
-    epoch = int(_load_fp_epochs().get(str(profile_id), 0))
-    tag = f'toolsub-cloak-{profile_id}' + (f'-{epoch}' if epoch else '')
-    return 10000 + zlib.crc32(tag.encode()) % 90000
+    v = aspect_value(profile_id, 'seed')
+    if v is not None:
+        return v
+    return 10000 + zlib.crc32(f'toolsub-cloak-{profile_id}'.encode()) % 90000
 
 
 # ── Dựng ChromeOptions ───────────────────────────────────────────────────────

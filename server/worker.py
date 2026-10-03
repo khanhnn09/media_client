@@ -767,6 +767,11 @@ class SeleniumFlowWorker:
             except Exception:
                 pass
             self._install_recaptcha_guard(driver)
+            try:
+                if int(self._server_settings.get('cloak_rotate_fp_on_block', 0) or 0):
+                    self._apply_fingerprint_overrides(driver, cloak=True)
+            except Exception as e:
+                self._log('warn', f'Không áp được fingerprint Cloak: {e}')
             if cloak_launch_config()['humanize']:
                 self._cloak_human = CloakHuman(driver)
             return driver
@@ -935,21 +940,32 @@ class SeleniumFlowWorker:
         return driver
 
     def _install_chrome_fingerprint(self, driver) -> None:
-        """(2026-10-03) Chrome thường: nếu profile đã bị đổi fingerprint (đời > 0,
-        do `cloak_rotate_fp_on_block`) thì chèn bản vá theo seed — phần cứng ảo +
-        nhiễu canvas/âm thanh. UA, platform, WebGL giữ NGUYÊN của máy thật để không
-        lệch nhau (lệch làm điểm reCAPTCHA tệ hơn). Đời 0 = không đụng gì."""
+        """(2026-10-03) Áp fingerprint đã đổi (do `cloak_rotate_fp_on_block`) lên
+        Chrome thường: JS (nhiễu canvas/audio/WebGL, ngôn ngữ, RAM) + CDP (số nhân
+        CPU, cửa sổ). UA/platform giữ NGUYÊN máy thật (đổi lệch làm điểm reCAPTCHA
+        tệ hơn). Chưa đổi mục nào = không đụng gì. Ghi log từng giá trị đang áp."""
         try:
             if not int(self._server_settings.get('cloak_rotate_fp_on_block', 0) or 0):
                 return
-            from .cloak_browser import fingerprint_patch_js
-            js = fingerprint_patch_js(self.profile_id)
-            if not js:
-                return
-            driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {'source': js})
-            self._log('info', 'Đã áp fingerprint Chrome (đời đã đổi do bị chặn)')
+            self._apply_fingerprint_overrides(driver, cloak=False)
         except Exception as e:
             self._log('warn', f'Không áp được fingerprint Chrome: {e}')
+
+    def _apply_fingerprint_overrides(self, driver, cloak: bool) -> None:
+        from .cloak_browser import (fingerprint_patch_js, apply_cdp_overrides,
+                                    current_fingerprint_lines)
+        lines = current_fingerprint_lines(self.profile_id, cloak)
+        if not lines:
+            return
+        if not cloak:
+            js = fingerprint_patch_js(self.profile_id)
+            if js:
+                driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {'source': js})
+        apply_cdp_overrides(driver, self.profile_id, log_fn=self._log)
+        self._log('info', 'Fingerprint đang áp ('
+                          + ('CloakBrowser' if cloak else 'Chrome') + '):')
+        for ln in lines:
+            self._log('info', f'   • {ln}')
 
     def _install_recaptcha_guard(self, driver) -> None:
         """Cài `RECAPTCHA_GUARD_JS` cho MỌI lần load trang sau này. Trang đang mở
@@ -7977,17 +7993,22 @@ class SeleniumFlowWorker:
         self._rotate_fingerprint_on_block()
 
     def _rotate_fingerprint_on_block(self) -> None:
-        """(2026-10-03) Bật `cloak_rotate_fp_on_block` + đang dùng CloakBrowser:
-        đổi seed fingerprint của profile rồi dừng worker (đóng Chrome). Worker mới
-        mở lại sau khi hết nghỉ sẽ dùng fingerprint mới. Cookie/đăng nhập giữ nguyên."""
+        """(2026-10-03) Bật `cloak_rotate_fp_on_block`: đổi các MỤC fingerprint đã
+        chọn trong hộp thoại profile (`fp_aspects`, rỗng = tất cả), ghi log từng mục
+        "cũ → mới", rồi dừng worker (đóng Chrome). Worker mở lại sau khi hết nghỉ
+        dùng fingerprint mới. Cookie/đăng nhập giữ nguyên."""
         try:
             if not int(self._server_settings.get('cloak_rotate_fp_on_block', 0) or 0):
                 return
-            from .cloak_browser import cloak_enabled, bump_fingerprint_epoch
-            n = bump_fingerprint_epoch(self.profile_id)
-            kind = 'CloakBrowser' if cloak_enabled() else 'Chrome'
-            self._log('warn', f'🔀 Đổi fingerprint {kind} (đời #{n}) — đóng trình duyệt, '
-                              f'lần mở sau dùng fingerprint mới')
+            from .cloak_browser import cloak_enabled, rotate_fingerprint, parse_fp_aspects
+            cloak = cloak_enabled()
+            aspects = parse_fp_aspects((self.profile or {}).get('fp_aspects'))
+            lines = rotate_fingerprint(self.profile_id, aspects, cloak)
+            kind = 'CloakBrowser' if cloak else 'Chrome'
+            self._log('warn', f'🔀 Đổi fingerprint {kind} do Google chặn — {len(lines)} mục:')
+            for ln in lines:
+                self._log('warn', f'   • {ln}')
+            self._log('warn', '   → đóng trình duyệt, lần mở sau dùng fingerprint mới')
             self._stop.set()
         except Exception as e:
             self._log('warn', f'Đổi fingerprint lỗi: {e}')

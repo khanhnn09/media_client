@@ -453,6 +453,9 @@ def _merge_local_flags(row):
         if row.get('veo_enabled') is None:
             v = loc.get('veo_enabled')
             row['veo_enabled'] = 1 if v is None else int(v)
+        # (2026-10-03) Mục fingerprint sẽ đổi khi bị chặn — CHỈ lưu cục bộ
+        # (CSV; rỗng = đổi tất cả). Xem cloak_browser.FP_ASPECTS.
+        row['fp_aspects'] = loc.get('fp_aspects') or ''
     return row
 
 
@@ -472,7 +475,7 @@ class _ProfileManager:
                gemini_max_concurrent_tabs=1, gemini_tab_switch_interval=0.5,
                chatgpt_attach_timeout=60, chatgpt_response_timeout=300,
                proxy_server='', run_hours='', totp_secret='', omni_enabled=0,
-               veo_enabled=1) -> int:
+               veo_enabled=1, fp_aspects='') -> int:
         profile_dir = str(Path(PROFILES_DIR) / name)
         os.makedirs(profile_dir, exist_ok=True)  # cục bộ — user-data-dir chỉ có ý nghĩa trên máy này
         # (2026-08-07) 'gemini_video' — BUG THẬT đã sót ở đây từ lúc thêm loại
@@ -514,6 +517,7 @@ class _ProfileManager:
                             1 if omni_enabled and worker_mode in ('api', 'dom') else 0)
             _set_local_flag(new_id, 'veo_enabled',
                             0 if (not veo_enabled and omni_enabled and worker_mode in ('api', 'dom')) else 1)
+            _set_local_flag(new_id, 'fp_aspects', fp_aspects or '')
         return new_id
 
     def update(self, profile_id: int, **fields):
@@ -533,6 +537,8 @@ class _ProfileManager:
         if 'veo_enabled' in sets:
             sets['veo_enabled'] = 1 if sets['veo_enabled'] else 0
             _set_local_flag(profile_id, 'veo_enabled', sets['veo_enabled'])
+        if 'fp_aspects' in fields:        # chỉ cục bộ, không gửi backend
+            _set_local_flag(profile_id, 'fp_aspects', fields['fp_aspects'] or '')
         if not sets:
             return
         _api('PATCH', f'/api/worker_profiles/{profile_id}', body=sets)

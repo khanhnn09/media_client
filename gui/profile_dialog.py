@@ -218,6 +218,23 @@ class ProfileDialog(QDialog):
         _eng.addWidget(self._omni_chk)
         _eng.addStretch(1)
 
+        # — Mục fingerprint sẽ đổi khi Google chặn (2026-10-03, chỉ VEO3). Chỉ có
+        # tác dụng khi bật setting "Đổi fingerprint khi bị chặn". Không tick ô nào
+        # = đổi TẤT CẢ. Lưu cục bộ (flag `fp_aspects`).
+        from server.cloak_browser import FP_ASPECTS, parse_fp_aspects
+        self._fp_w = QWidget()
+        _fp_lay = QVBoxLayout(self._fp_w)
+        _fp_lay.setContentsMargins(0, 0, 0, 0)
+        _fp_lay.setSpacing(2)
+        _saved_fp = (self._p or {}).get('fp_aspects') or ''
+        _on_fp = set(parse_fp_aspects(_saved_fp)) if _saved_fp else set(FP_ASPECTS)
+        self._fp_checks = {}
+        for _k, _label in FP_ASPECTS.items():
+            _cb = QCheckBox(_label)
+            _cb.setChecked(_k in _on_fp)
+            _fp_lay.addWidget(_cb)
+            self._fp_checks[_k] = _cb
+
         # — Khung giờ chạy (2026-09-17, chỉ VEO3) — 24 ô 0..23, ô `h` = nhận task
         # trong khoảng h:00-h:59 theo giờ máy này. Không tick ô nào = chạy liên tục.
         # Áp dụng ở `worker._heartbeat` (không nhận task) + dispatcher (không mở/
@@ -378,6 +395,7 @@ class ProfileDialog(QDialog):
         f_task.addRow(label('Response timeout'), self._chatgpt_resp_to)
 
         f_hours.addRow(label('Giờ chạy'), self._run_hours_w)
+        f_hours.addRow(label('Đổi fingerprint'), self._fp_w)
 
         f_misc.addRow(label('Proxy'),   self._proxy)
         f_misc.addRow(label('Ghi chú'), self._notes)
@@ -429,7 +447,7 @@ class ProfileDialog(QDialog):
         # "Attach timeout" nhưng là 2 widget RIÊNG — ẩn/hiện theo widget nên không nhầm.
         self._type_fields = {
             'veo3':         [self._url, self._task_mode, self._worker_mode, self._max_concurrent,
-                             self._engines_w, self._run_hours_w],
+                             self._engines_w, self._run_hours_w, self._fp_w],
             'gemini':       [self._gemini_attach_to, self._gemini_resp_to,
                               self._gemini_max_tabs, self._gemini_tab_interval],
             'chatgpt':      [self._chatgpt_attach_to, self._chatgpt_resp_to],
@@ -630,6 +648,8 @@ class ProfileDialog(QDialog):
             data['run_hours']      = ','.join(str(h) for h in self._checked_hours())
             data['omni_enabled']   = 1 if self._omni_chk.isChecked() else 0
             data['veo_enabled']    = 1 if self._veo_chk.isChecked() else 0
+            _sel = [k for k, cb in self._fp_checks.items() if cb.isChecked()]
+            data['fp_aspects'] = '' if len(_sel) == len(self._fp_checks) else ','.join(_sel)
         if current != 'veo3':
             data['run_hours'] = ''   # khung giờ chạy chỉ áp dụng VEO3
             data['omni_enabled'] = 0 # Omni chỉ chạy kèm VEO3
