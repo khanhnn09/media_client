@@ -58,6 +58,11 @@ def _is_transient(msg: str) -> bool:
         return False
     return any(h.lower() in m.lower() for h in _TRANSIENT_HINTS)
 _ACCOUNT_BACKOFF_SECS = 600
+# (2026-10-03) REQUEST_REFUSED (HTTP 400, espresso-pa) liên tiếp từng này lần → coi như
+# Google đang chặn tài khoản/fingerprint: nghỉ + đổi fingerprint (nếu bật cài đặt
+# `cloak_rotate_fp_on_block`). 1 lần lẻ thường chỉ là prompt/ảnh bị bộ lọc nội dung
+# từ chối — đổi fingerprint vì 1 prompt xấu là không có tác dụng và làm mất phiên.
+_REFUSED_ROTATE_AFTER = 2
 _GENERATE_TIMEOUT_SECS = omni_be.GENERATE_TIMEOUT_SECS + 15   # JS tự huỷ fetch trước mốc này
 _PAGE_MAX_AGE_SECS = 1800     # nạp lại trang Vids định kỳ (token docs-est có hạn)
 # (2026-09-29) Task Omni lỗi → quay về trang chủ Vids tạo tài liệu MỚI, các task
@@ -175,6 +180,7 @@ class OmniLane:
         self.error_count = 0
         self.inflight = 0              # số task đang tạo — dispatcher không đóng profile khi > 0
         self.need_new_doc = False      # có task lỗi → tạo tài liệu Vids mới trước lô kế tiếp
+        self._refused_streak = 0       # số task liên tiếp bị REQUEST_REFUSED
         self._new_doc_fails = 0
         self._new_doc_at = 0.0
 
@@ -604,7 +610,7 @@ class OmniLane:
             omni_be.call_expr('fetchB64', urls[0]), timeout=180) or {}, ok=lambda x: x.get('b64'))
         data = base64.b64decode(r['b64'])
         self._step('gửi kết quả về server', lambda: self.w._upload_video_result(task_id, data, source='omni') or True)
-        self.done_count += 1
+        self.done_count += 1; self._refused_streak = 0
         try:
             pm.bump_task_stat(self.profile_id, 'done')
         except Exception:
@@ -661,8 +667,10 @@ class OmniLane:
 
     def _fail(self, task: dict, err):
         msg = str(err)
-        if 'REQUEST_REFUSED' in msg:
+        refused = 'REQUEST_REFUSED' in msg
+        if refused:
             self._dump_refused(task['id'], msg)
+        self._refused_streak = self._refused_streak + 1 if refused else 0
         (getattr(self, '_inputs', {}) or {}).pop(task['id'], None)
         self._log('error', f'✘ Task #{task["id"]}: {msg[:300]}')
         self._report_error(task['id'], msg[:500])
@@ -672,6 +680,17 @@ class OmniLane:
         if any(h in msg for h in _ACCOUNT_BLOCK_HINTS):
             self._backoff_until = time.time() + _ACCOUNT_BACKOFF_SECS
             self._log('warn', f'Lỗi tầng tài khoản — làn Omni nghỉ {_ACCOUNT_BACKOFF_SECS // 60} phút')
+        if refused and self._refused_streak >= _REFUSED_ROTATE_AFTER:
+            self._backoff_until = time.time() + _ACCOUNT_BACKOFF_SECS
+            self._log('warn', f'REQUEST_REFUSED {self._refused_streak} task liên tiếp — làn Omni nghỉ '
+                              f'{_ACCOUNT_BACKOFF_SECS // 60} phút, đổi fingerprint')
+            self._refused_streak = 0
+            try:
+                # Đóng trình duyệt (worker dừng) để lần mở sau dùng fingerprint mới;
+                # no-op nếu chưa bật cài đặt `cloak_rotate_fp_on_block`.
+                self.w._rotate_fingerprint_on_block()
+            except Exception as e:
+                self._log('warn', f'Đổi fingerprint lỗi: {e}')
 
     @staticmethod
     def _source_urls(task: dict) -> list[str]:
