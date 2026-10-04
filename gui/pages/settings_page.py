@@ -52,6 +52,10 @@ _TABS = [
          'Chuột đi đường cong, gõ phím theo nhịp người thật khi thao tác giao diện (như launch(humanize=True)).'),
     ]),
     ('Tạo ảnh/video', [
+        ('api_fake_typing',                'Profile API: gõ prompt giả người dùng', 'bool',
+         'Trước mỗi lệnh gọi API, gõ prompt vào ô nhập của trang như người thật (KHÔNG bấm Gửi), '
+         'post API xong thì xoá chữ trong ô — lặp lại cho từng task. Chỉ tạo hoạt động giống người dùng '
+         'trên trang; việc tạo vẫn do API làm.'),
         ('api_fallback_to_dom',            'Profile API: lỗi API thì chuyển sang DOM', 'bool',
          'Mặc định tắt — profile API CHỈ chạy API, task lỗi báo về server. Bật = task lỗi API '
          '(hoặc không gọi được API) chạy lại ngay bằng DOM. Video đã gửi API thành công '

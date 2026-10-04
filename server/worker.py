@@ -8045,6 +8045,126 @@ class SeleniumFlowWorker:
             if not self._release_task(t['id'], reason):
                 self._report_task_error(t['id'], f'Google chặn tài khoản: {reason}', _no_release=True)
 
+    # ── Gõ prompt giả người dùng (API mode) ────────────────────────────────
+    def _fake_typing_on(self) -> bool:
+        return (getattr(self, 'worker_mode', '') == 'api'
+                and bool(int(self._server_settings.get('api_fake_typing', 0) or 0)))
+
+    def _fake_type_prompt(self, prompt: str) -> None:
+        """(2026-10-04) API mode: gõ prompt vào ô nhập (ProseMirror) như người thật
+        — click ô, xoá chữ cũ, gõ từng ký tự đầu rồi phần còn lại — nhưng KHÔNG bấm
+        Gửi. Lệnh tạo vẫn đi bằng API; ô nhập chỉ để trang có hoạt động gõ phím thật.
+        Best-effort: lỗi chỉ ghi log, không chặn task."""
+        if not self._fake_typing_on() or not prompt:
+            return
+        try:
+            ce = self._js('return document.querySelector(\'.ProseMirror[contenteditable="true"]\');')
+            if not ce:
+                return
+            self._fake_clear_prompt(ce)
+            if getattr(self, '_cloak_human', None):
+                self._cdp_click_el(ce)
+            else:
+                r = self.driver.execute_script(
+                    "var r=arguments[0].getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2};", ce)
+                for et in ('mousePressed', 'mouseReleased'):
+                    self._cdp('Input.dispatchMouseEvent', {'type': et, 'x': int(r['x']), 'y': int(r['y']),
+                                                           'button': 'left', 'clickCount': 1})
+            self._sleep(0.3)
+            head, rest = prompt[:60], prompt[60:]
+            human = getattr(self, '_cloak_human', None)
+            if human:
+                human.type_text(head)          # đã có gõ sai rồi xoá của cloakbrowser.human
+            else:
+                typos = 0
+                for ch in head:
+                    # ~7% ký tự gõ nhầm phím kế bên → khựng 0.2-0.5s → Backspace → gõ lại đúng.
+                    if ch.isalpha() and random.random() < 0.07 and typos < 4:
+                        wrong = self._fake_neighbor_key(ch)
+                        self._cdp('Input.insertText', {'text': wrong})
+                        self._sleep(0.2 + random.random() * 0.3)
+                        self._fake_backspace(1)
+                        self._sleep(0.1 + random.random() * 0.15)
+                        typos += 1
+                    self._cdp('Input.insertText', {'text': ch})
+                    self._sleep(0.06 + random.random() * 0.10)
+            if rest:
+                # Phần còn lại gõ theo cụm ~40 ký tự, nghỉ ngắn; thỉnh thoảng xoá lùi
+                # vài ký tự vừa gõ rồi gõ lại như người sửa câu.
+                for k in range(0, len(rest), 40):
+                    chunk = rest[k:k + 40]
+                    self._cdp('Input.insertText', {'text': chunk})
+                    self._sleep(0.12 + random.random() * 0.2)
+                    if len(chunk) >= 12 and random.random() < 0.25:
+                        n = random.randint(3, 8)
+                        self._sleep(0.3 + random.random() * 0.4)
+                        self._fake_backspace(n)
+                        self._sleep(0.15 + random.random() * 0.2)
+                        self._cdp('Input.insertText', {'text': chunk[-n:]})
+                        self._sleep(0.1 + random.random() * 0.15)
+            self._log('info', f'⌨ Đã gõ prompt vào ô nhập ({len(prompt)} ký tự) — không bấm Gửi')
+        except Exception as e:
+            self._log('warn', f'Gõ prompt giả lỗi (bỏ qua): {e}')
+
+    @staticmethod
+    def _fake_neighbor_key(ch: str) -> str:
+        """Phím kế bên trên bàn phím QWERTY (giả lập gõ nhầm)."""
+        rows = ['qwertyuiop', 'asdfghjkl', 'zxcvbnm']
+        low = ch.lower()
+        for row in rows:
+            i = row.find(low)
+            if i >= 0:
+                j = i + 1 if i + 1 < len(row) else i - 1
+                out = row[j]
+                return out.upper() if ch.isupper() else out
+        return ch
+
+    def _fake_backspace(self, n: int = 1) -> None:
+        for _ in range(n):
+            for typ in ('keyDown', 'keyUp'):
+                self._cdp('Input.dispatchKeyEvent', {'type': typ, 'key': 'Backspace', 'code': 'Backspace',
+                                                     'windowsVirtualKeyCode': 8})
+            self._sleep(0.04 + random.random() * 0.06)
+
+    def _fake_clear_prompt(self, ce=None) -> None:
+        """Xoá chữ trong ô nhập: Ctrl+A rồi Backspace qua CDP (như người thật)."""
+        if not self._fake_typing_on():
+            return
+        try:
+            if ce is None:
+                ce = self._js('return document.querySelector(\'.ProseMirror[contenteditable="true"]\');')
+            if not ce:
+                return
+            n = self._js('var c=document.querySelector(\'.ProseMirror[contenteditable="true"]\');'
+                         'return c?(c.innerText||"").trim().length:0;') or 0
+            if not n:
+                return
+            self.driver.execute_script('arguments[0].focus();', ce)
+            for typ in ('keyDown', 'keyUp'):
+                self._cdp('Input.dispatchKeyEvent', {'type': typ, 'key': 'a', 'code': 'KeyA',
+                                                     'windowsVirtualKeyCode': 65, 'modifiers': 2})
+            for typ in ('keyDown', 'keyUp'):
+                self._cdp('Input.dispatchKeyEvent', {'type': typ, 'key': 'Backspace', 'code': 'Backspace',
+                                                     'windowsVirtualKeyCode': 8})
+            left = self._js('var c=document.querySelector(\'.ProseMirror[contenteditable="true"]\');'
+                            'return c?(c.innerText||"").trim().length:0;') or 0
+            if left:     # dự phòng: xoá bằng JS nếu phím không ăn
+                self._js('var c=document.querySelector(\'.ProseMirror[contenteditable="true"]\');'
+                         'if(c){c.focus();document.execCommand("selectAll");document.execCommand("delete");}')
+        except Exception as e:
+            self._log('warn', f'Xoá prompt trong ô nhập lỗi (bỏ qua): {e}')
+
+    def _fake_clear_after(self, fut, max_wait: float = 10.0) -> None:
+        """Chờ lệnh API (future) post xong (tối đa max_wait giây) rồi xoá prompt."""
+        if not self._fake_typing_on():
+            return
+        t0 = time.time()
+        while not fut.done() and time.time() - t0 < max_wait:
+            if self._stop.wait(0.3):
+                return
+        self._fake_clear_prompt()
+        self._log('info', '⌫ Đã xoá prompt trong ô nhập sau khi post API')
+
     def _stagger_delay(self, lo: float, hi: float) -> float:
         """Giãn cách trước lần gửi kế tiếp: random [lo,hi], nhân hệ số nếu vừa
         bị chặn gần đây, cộng thêm nghỉ định kỳ sau mỗi N lần gửi."""
@@ -8185,8 +8305,10 @@ class SeleniumFlowWorker:
                 if not self._extract_project_id():
                     ui_tasks.append(task)
                     continue
+                self._fake_type_prompt(task.get('prompt_text') or task.get('title') or '')
                 captcha = self._get_fresh_recaptcha('IMAGE_GENERATION')
                 if not captcha:
+                    self._fake_clear_prompt()
                     ui_tasks.append(task)
                     continue
 
@@ -8205,6 +8327,7 @@ class SeleniumFlowWorker:
                 self._log('info', f'▶ Task #{task_id} — chạy media (thread song song)…')
                 fut = pool.submit(_worker, task, captcha)
                 futures[fut] = task
+                self._fake_clear_after(fut)
 
                 if i < len(tasks) - 1:
                     delay = self._stagger_delay(stagger_min, stagger_max)
@@ -8319,8 +8442,10 @@ class SeleniumFlowWorker:
                     # Kiểm tra điều kiện TRƯỚC khi mint reCAPTCHA (mint là 1 lời
                     # gọi THẬT tới Google) — trước đây mint xong mới kiểm tra nên
                     # mỗi task hỏng vẫn đốt 1 token vô ích (log 09:07).
+                    self._fake_type_prompt(task.get('prompt_text') or task.get('title') or '')
                     captcha = self._get_fresh_recaptcha('VIDEO_GENERATION')
                     if not captcha:
+                        self._fake_clear_prompt()
                         raise RuntimeError('Không lấy được reCAPTCHA VIDEO_GENERATION')
                 except Exception as e:
                     if self._api_task_failed(task, f'(chuẩn bị) {e}', dom_queue):
@@ -8334,6 +8459,7 @@ class SeleniumFlowWorker:
                     self._log('info', f'▶ Task #{task_id} — chạy media (thread song song)…')
                     fut = pool.submit(_worker, task, captcha, names)
                     futures[fut] = task
+                    self._fake_clear_after(fut)
 
                 # Giãn cách áp dụng cho CẢ task hỏng ở bước chuẩn bị.
                 # (2026-09-04, user hỏi "sao không thấy giãn cách trong log"):
