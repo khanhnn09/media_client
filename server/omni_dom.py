@@ -25,13 +25,29 @@ import random
 import re
 import time
 
-_CHIP_RE = re.compile(r'Cài đặt tạo video:\s*([^,]+),\s*(\d{3,4}p),\s*([^,]+),\s*(\d+)\s*giây', re.I)
+# Chip cài đặt: "Cài đặt tạo video: Omni, 720p, Khổ ngang, 10 giây" (vi) /
+# "Video settings: Omni, 720p, Landscape, 10 seconds" (en, chưa đo thật) — regex không dính chữ cố định.
+_CHIP_RE = re.compile(r':\s*([^,]+),\s*(\d{3,4}p),\s*([^,]+),\s*(\d+)', re.I)
+_PORTRAIT_WORDS = ('khổ dọc', 'portrait', 'vertical', 'tall')
+_LANDSCAPE_WORDS = ('khổ ngang', 'landscape', 'horizontal', 'wide')
+
+# Biến thể nhãn theo ngôn ngữ giao diện (vi + en). Nhãn tiếng Anh là SUY LUẬN — không có tài
+# khoản tiếng Anh để đo. Phần quan trọng (nút mở panel, ô prompt, chip, nút Tạo) còn có
+# cách chọn KHÔNG phụ thuộc chữ (lớp CSS / role / vị trí) nên vẫn chạy nếu nhãn sai.
+_RAIL_BTN = '.appsSketchyContentLibraryRailToolbarButtonContainerRefreshed'
+_RE_CLEAR = '/^(xoá|xóa|clear|clear all|reset)$/i'
+_RE_CLOSE = '/^(đóng|close|dismiss|got it|no thanks)$/i'
+_RE_CREATE = '/^(tạo|create|generate)$/i'
+_RE_BUSY = '/(huỷ|hủy|cancel|stop generating)/i'
+_RE_AGREE = '/^(đồng ý|agree|accept|i agree|ok|got it)$/i'
+_BUSY_WORDS = ('Huỷ', 'Hủy', 'Cancel')
 _ERR_WORDS = ('không thể tạo', 'đã xảy ra lỗi', 'vi phạm', 'chính sách', 'thử lại sau',
               "couldn't generate", 'something went wrong')
 
 
 # Nhãn ô prompt đổi theo trạng thái: lúc trống/đã đính ảnh thành phần.
-_TB_SEL = '[role=textbox][aria-label^="Mô tả video"], [role=textbox][aria-label^="Hãy chỉ định"]'
+_TB = ("[...document.querySelectorAll('[role=textbox]')].find(e=>{const q=e.getBoundingClientRect();"
+       "return q.width>0&&q.x>window.innerWidth*0.45})")
 
 
 class OmniDomError(RuntimeError):
@@ -88,16 +104,25 @@ class OmniDom:
 
     # ── panel + trạng thái ──────────────────────────────────────────────────
     def _panel_open(self) -> bool:
-        return bool(self._eval("!!(%s)" % self._vis(_TB_SEL)))
+        return bool(self._eval("!!(%s)" % _TB))
 
     def open_panel(self):
         self.tab.send('Emulation.setFocusEmulationEnabled', {'enabled': True})
         if self._panel_open():
             return
         # Hộp thoại chào mừng che giao diện — đóng nếu có.
-        if self._click(self._vis('[aria-label="Đóng"]'), 'nút Đóng hộp thoại', 1.2):
+        if self._click("[...document.querySelectorAll('button,[role=button]')].find(b=>b.getBoundingClientRect().width>0&&"
+                       "%s.test((b.getAttribute('aria-label')||b.innerText||'').trim().normalize('NFC')))" % _RE_CLOSE,
+                       'nút Đóng hộp thoại', 1.2):
             self._log('info', 'DOM Omni: đã đóng hộp thoại chào')
-        self._need_click(self._vis('[aria-label="Tạo đoạn video bằng AI"]'), 'nút "Video AI"', 2.5)
+        # Nút "Video AI" = nút ĐẦU TIÊN của cột công cụ bên phải (lớp CSS, không phụ thuộc ngôn ngữ);
+        # dự phòng theo nhãn vi/en.
+        self._need_click("(%s)||(%s)" % (
+            "[...document.querySelectorAll(%s)].filter(e=>e.getBoundingClientRect().width>0)"
+            ".sort((a,b)=>a.getBoundingClientRect().y-b.getBoundingClientRect().y)[0]" % json.dumps(_RAIL_BTN),
+            "[...document.querySelectorAll('[aria-label]')].find(e=>e.getBoundingClientRect().width>0&&"
+            "/^(tạo đoạn video bằng ai|(create|generate) (an? )?ai video( clip)?|ai video)/i.test(e.getAttribute('aria-label')))"),
+            'nút "Video AI"', 2.5)
         for _ in range(10):
             if self._panel_open():
                 break
@@ -105,12 +130,14 @@ class OmniDom:
         if not self._panel_open():
             raise OmniDomError('DOM Omni: mở panel "Video AI" không được (không thấy ô prompt)')
         # Tab "Tạo" (mặc định đã chọn) — bấm cho chắc.
-        self._click(self._vis('[role=tab][aria-label="Tạo"]'), 'tab Tạo', 0.5)
+        self._click("[...document.querySelectorAll('[role=tab]')].find(e=>e.getBoundingClientRect().width>0&&"
+                    "%s.test((e.getAttribute('aria-label')||e.innerText||'').trim().normalize('NFC')))" % _RE_CREATE,
+                    'tab Tạo', 0.5)
 
     def _chip_state(self) -> dict | None:
         label = self._eval(
             "(()=>{const e=[...document.querySelectorAll('button')].find(b=>b.offsetParent!==null&&"
-            "(b.getAttribute('aria-label')||'').startsWith('Cài đặt tạo video'));"
+            "/\\b(720|1080)p\\b/.test(b.getAttribute('aria-label')||''));"
             "return e?e.getAttribute('aria-label'):null})()")
         if not label:
             return None
@@ -126,15 +153,15 @@ class OmniDom:
 
     # ── gõ prompt ───────────────────────────────────────────────────────────
     def _set_prompt(self, prompt: str):
-        self._need_click(self._vis(_TB_SEL), 'ô prompt', 0.5)
+        self._need_click(_TB, 'ô prompt', 0.5)
         # Xoá chữ cũ (nút "Xoá" chỉ hiện khi có chữ) rồi gõ.
         self._click("[...document.querySelectorAll('button')].find(b=>b.offsetParent!==null&&"
-                    "(b.innerText||'').trim()==='Xoá')", 'nút Xoá', 0.6)
-        self._need_click(self._vis(_TB_SEL), 'ô prompt', 0.4)
+                    "%s.test((b.innerText||'').trim().normalize('NFC')))" % _RE_CLEAR, 'nút Xoá', 0.6)
+        self._need_click(_TB, 'ô prompt', 0.4)
         self.tab.send('Input.insertText', {'text': prompt})
         time.sleep(0.8)
         got = self._eval("(()=>{const e=%s;return e?(e.innerText||'').trim().length:0})()"
-                         % self._vis(_TB_SEL)) or 0
+                         % _TB) or 0
         if got < max(1, len(prompt.strip()) * 0.5):
             raise OmniDomError(f'DOM Omni: gõ prompt thất bại ({got}/{len(prompt.strip())} ký tự)')
 
@@ -166,7 +193,7 @@ class OmniDom:
         n0 = self._count_attached()
         self._eval("window.__oiInput=null")
         # Ô "Thành phần" (lúc chưa có ảnh) / nút "Thêm" (đã có ảnh) chỉ hiện khi ô prompt đang focus.
-        self._need_click(self._vis(self._TEXTBOX), 'ô prompt', 0.5)
+        self._need_click(_TB, 'ô prompt', 0.5)
         for t in ('keyDown', 'keyUp'):                       # con trỏ về cuối chữ
             self.tab.send('Input.dispatchKeyEvent', {'type': t, 'key': 'End', 'code': 'End',
                                                      'windowsVirtualKeyCode': 35, 'modifiers': 2})
@@ -202,7 +229,7 @@ class OmniDom:
         time.sleep(1.5)
         # Lần đầu Vids hiện hộp chính sách ảnh — đồng ý nếu có.
         self._click("[...document.querySelectorAll('button')].find(b=>b.getBoundingClientRect().width>0&&"
-                    "/^(đồng ý|agree|accept)$/i.test((b.innerText||'').trim().normalize('NFC')))", 'nút Đồng ý', 1.0)
+                    "%s.test((b.innerText||'').trim().normalize('NFC')))" % _RE_AGREE, 'nút Đồng ý', 1.0)
         for _ in range(30):                                # chờ ảnh tải xong và hiện thẻ
             if self._count_attached() > n0:
                 return
@@ -222,7 +249,7 @@ class OmniDom:
 
     # ── chip cài đặt ────────────────────────────────────────────────────────
     _CHIP = ("[...document.querySelectorAll('button')].find(b=>b.offsetParent!==null&&"
-             "(b.getAttribute('aria-label')||'').startsWith('Cài đặt tạo video'))")
+             "/\\b(720|1080)p\\b/.test(b.getAttribute('aria-label')||''))")
     _RADIOS = ("[...document.querySelectorAll('button[role=radio]')].filter(b=>b.getBoundingClientRect().width>0)"
                ".sort((a,b)=>a.getBoundingClientRect().x-b.getBoundingClientRect().x)")
 
@@ -282,9 +309,13 @@ class OmniDom:
             time.sleep(0.3)
         return False
 
+    @staticmethod
+    def _is_portrait(aspect_text: str) -> bool:
+        t = (aspect_text or '').lower()
+        return any(w in t for w in _PORTRAIT_WORDS)
+
     def _apply_settings(self, aspect_portrait: bool, resolution: str, duration: int):
         want_res = resolution.lower()
-        want_aspect = 'khổ dọc' if aspect_portrait else 'khổ ngang'
         got: dict = {}
         for _ in range(8):                       # mỗi vòng sửa 1 mục lệch rồi đọc lại chip
             got = self._chip_state() or {}
@@ -293,10 +324,10 @@ class OmniDom:
                 self._log('info', f'  → đổi độ phân giải {want_res}')
                 self._fix_resolution(want_res)
                 self._wait_chip(lambda c: c.get('res') == want_res)
-            elif got.get('aspect', '').lower() != want_aspect:
-                self._log('info', f'  → đổi khổ {want_aspect}')
+            elif self._is_portrait(got.get('aspect', '')) != aspect_portrait:
+                self._log('info', f'  → đổi khổ {"dọc" if aspect_portrait else "ngang"}')
                 self._fix_aspect(aspect_portrait)
-                self._wait_chip(lambda c: c.get('aspect', '').lower() == want_aspect)
+                self._wait_chip(lambda c: self._is_portrait(c.get('aspect', '')) == aspect_portrait)
             elif got.get('dur') != duration:
                 if not self._fix_duration(duration):
                     self._log('warn', 'DOM Omni: không thấy thanh thời lượng — giữ giá trị mặc định')
@@ -306,14 +337,14 @@ class OmniDom:
                 break
         self._close_popup()
         got = self._chip_state() or {}
-        if got.get('res') != want_res or got.get('aspect', '').lower() != want_aspect:
-            raise OmniDomError(f'DOM Omni: chip chưa đúng cài đặt — muốn {want_res}/{want_aspect}, '
+        if got.get('res') != want_res or self._is_portrait(got.get('aspect', '')) != aspect_portrait:
+            raise OmniDomError(f'DOM Omni: chip chưa đúng cài đặt — muốn {want_res}/{'dọc' if aspect_portrait else 'ngang'}, '
                                f'đang {got.get("raw")}')
         if got.get('dur') != duration:
             self._log('warn', f'DOM Omni: thời lượng đang {got.get("dur")}s (muốn {duration}s)')
 
     # ── gõ giả (chế độ API) ─────────────────────────────────────────────────
-    _TEXTBOX = _TB_SEL
+    _TEXTBOX = None
 
     def _backspace(self, n: int = 1):
         for _ in range(n):
@@ -339,7 +370,7 @@ class OmniDom:
         try:
             self.open_panel()
             self.fake_clear()
-            self._need_click(self._vis(self._TEXTBOX), 'ô prompt', 0.4)
+            self._need_click(_TB, 'ô prompt', 0.4)
             head, rest = prompt[:60], prompt[60:]
             typos = 0
             for ch in head:
@@ -369,12 +400,12 @@ class OmniDom:
         """Xoá chữ trong ô prompt (nút "Xoá", dự phòng Ctrl+A + Backspace)."""
         try:
             n = self._eval("(()=>{const e=%s;return e?(e.innerText||'').trim().length:0})()"
-                           % self._vis(self._TEXTBOX)) or 0
+                           % _TB) or 0
             if not n:
                 return
             if not self._click("[...document.querySelectorAll('button')].find(b=>b.offsetParent!==null&&"
-                               "(b.innerText||'').trim().normalize('NFC')==='Xoá')", 'nút Xoá', 0.5):
-                self._click(self._vis(self._TEXTBOX), 'ô prompt', 0.3)
+                               "%s.test((b.innerText||'').trim().normalize('NFC')))" % _RE_CLEAR, 'nút Xoá', 0.5):
+                self._click(_TB, 'ô prompt', 0.3)
                 for typ in ('keyDown', 'keyUp'):
                     self.tab.send('Input.dispatchKeyEvent', {'type': typ, 'key': 'a', 'code': 'KeyA',
                                                              'windowsVirtualKeyCode': 65, 'modifiers': 2})
@@ -394,14 +425,14 @@ class OmniDom:
             self.add_ingredients(images)
         self._apply_settings(aspect_portrait, resolution, duration)
         send = ("[...document.querySelectorAll('button')].find(b=>b.offsetParent!==null&&"
-                "b.getAttribute('aria-label')==='Tạo'&&b.getAttribute('role')!=='tab'&&!b.disabled)")
+                "%s.test((b.getAttribute('aria-label')||'').normalize('NFC'))&&b.getAttribute('role')!=='tab'&&!b.disabled)" % _RE_CREATE)
         self._need_click(send, 'nút gửi "Tạo"', 1.5)
         t0 = time.time()
         saw_progress = False
         while time.time() - t0 < timeout:
             time.sleep(2.5)
             txt = (self._eval("document.body.innerText.normalize('NFC')") or '')
-            busy = 'Huỷ' in txt
+            busy = any(w in txt for w in _BUSY_WORDS)
             saw_progress = saw_progress or busy
             new = [s for s in self._video_srcs() - before if 'usercontent.google.com' in s]
             if new and not busy:
