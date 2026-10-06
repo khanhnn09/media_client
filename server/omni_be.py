@@ -163,13 +163,13 @@ def build_generate_body(prompt: str,
         ctx[25] = [_ingredient_entry(u, b, lab) for (u, b, lab) in ings]
     ctx[40] = 0
 
-    segs: list = []
-    for i, (u, _b, lab) in enumerate(ings):
-        if i:
-            segs.append(_text_segment(' '))
-        segs.append(_chip_segment(u, lab))
+    # Thứ tự GIỐNG UI thật: chữ prompt TRƯỚC, rồi " " + chip từng ảnh. (Chip đứng trước chữ làm
+    # server trả REQUEST_REFUSED với cùng nội dung mà UI tạo bình thường — đã so thật 2026-10-06.)
     text = (prompt or '').strip()
-    segs.append(_text_segment((' ' + text) if ings else text))
+    segs: list = [_text_segment(text)]
+    for (u, _b, lab) in ings:
+        segs.append(_text_segment(' '))
+        segs.append(_chip_segment(u, lab))
     prompt_block = [None, None, None, [segs]]
 
     # settings[15] = [0, 12, null, 0, <tỉ lệ>, null, null, null, <số giây>]
