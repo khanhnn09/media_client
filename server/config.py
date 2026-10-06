@@ -148,6 +148,8 @@ _DEFAULT_SERVER_SETTINGS = {
     # (2026-09-27) Làn Omni (Google Vids) chạy kèm profile VEO bật "Kết hợp chạy
     # Omni" — số task video làn Omni nhận/bắn đồng thời (1-5). Xem server/omni_lane.py.
     'omni_max_concurrent': 1,
+    'omni_mode': 'api',          # 'api' = gọi genai/generate | 'dom' = thao tác giao diện Vids (chỉ text→video)
+    'omni_resolution': 'project',  # 'project' = theo project (video_resolution) | '720p' | '1080p'
     # 2026-09-24: mở trình duyệt bằng CloakBrowser (luồng riêng server/cloak_browser.py)
     'use_cloakbrowser': 0,
     'cloak_geoip':      1,   # = launch(geoip=True): múi giờ + ngôn ngữ + WebRTC theo IP proxy

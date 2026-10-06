@@ -26,6 +26,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import random
 import threading
 import time
 from pathlib import Path
@@ -397,12 +398,22 @@ class OmniLane:
             return
         pending = {}                     # key -> (task, t0, lần_thử)
         self._st = st
+        dom_tasks = []
         for t in tasks:
             if self._stopped():
                 self._report_error(t['id'], 'Worker dừng trước khi chạy task')
                 continue
+            if self._use_dom(t):
+                dom_tasks.append(t)         # chạy tuần tự sau khi bắn xong các task API
+                continue
             self._start_task(t, pending, attempt=0, first=True)
         last_ka = time.time()
+        for t in dom_tasks:                  # DOM: từng task một (panel chỉ có 1 tiến trình)
+            if self._stopped():
+                self._report_error(t['id'], 'Worker dừng trước khi chạy task')
+                continue
+            self._run_task_dom(t)
+            self._heartbeat(running=len(pending), keepalive_only=True)
         while pending and not self._stopped():
             time.sleep(3)
             for key in list(pending):
@@ -434,6 +445,48 @@ class OmniLane:
                 last_ka = time.time()
         for key, (t, _t0, _a) in pending.items():
             self._report_error(t['id'], 'Worker dừng giữa lúc tạo video')
+
+    # ── độ phân giải + chế độ ───────────────────────────────────────────────
+    def _resolution(self, task: dict) -> str:
+        """Setting `omni_resolution`: 'project' (mặc định) = theo `videoResolution` của task
+        (project), hoặc ép '720p'/'1080p'. 1080p tạo thẳng 1920x1080 — không cần upscale."""
+        mode = str(get_local_settings().get('omni_resolution') or 'project').lower()
+        if mode in ('720p', '1080p'):
+            return mode
+        return omni_be.normalize_resolution(task.get('videoResolution') or task.get('video_resolution'))
+
+    def _use_dom(self, task: dict) -> bool:
+        """Setting `omni_mode` = 'dom' → tạo bằng giao diện (kể cả task có ảnh thành phần)."""
+        return str(get_local_settings().get('omni_mode') or 'api').lower() == 'dom'
+
+    def _run_task_dom(self, t: dict):
+        """Tạo 1 task bằng giao diện Vids (tuần tự, 1 task/lần — panel chỉ có 1 tiến trình)."""
+        from .omni_dom import OmniDom, OmniDomError
+        task_id = t['id']
+        prompt = (t.get('prompt_text') or t.get('title') or '').strip()
+        self._log('info', f'▶ Task #{task_id} [DOM] mode={t.get("mode")} "{prompt[:70]}"')
+        self.w._req('POST', f'{FLOW_SERVER}/api/media/task/processing',
+                    body={'taskId': task_id, 'machineCode': self.machine_code})
+        t0 = time.time()
+        try:
+            dom = OmniDom(self.tab, self._log)
+            urls = self._source_urls(t)[:omni_be.MAX_INGREDIENTS]
+            images = []
+            for i, u in enumerate(urls):
+                r = req_lib.get(u, timeout=60)
+                r.raise_for_status()
+                mime = ((getattr(r, 'headers', None) or {}).get('content-type') or 'image/png').split(';')[0]
+                images.append((r.content, mime, f'ref_{i + 1}.' + ('jpg' if 'jpeg' in mime else 'png')))
+            portrait = omni_be.aspect_code(t.get('aspect_ratio')) == omni_be.ASPECT_PORTRAIT
+            url = dom.generate(prompt, portrait, self._resolution(t),
+                               omni_be.clamp_duration(t.get('omniDuration') or t.get('video_duration')
+                                                      or omni_be.DEFAULT_DURATION),
+                               timeout=_GENERATE_TIMEOUT_SECS, images=images)
+            self._finish(t, {'status': 200, 'text': url}, time.time() - t0)
+        except OmniDomError as e:
+            self._fail(t, e)
+        except Exception as e:
+            self._retry_or_fail(t, e, {}, 0)
 
     def _start_task(self, t: dict, pending: dict, attempt: int, first: bool = False):
         try:
@@ -588,16 +641,32 @@ class OmniLane:
 
         body = omni_be.build_generate_body(prompt, ings, doc_id=st.get('docId'),
                                            aspect_ratio=task.get('aspect_ratio'),
+                                           resolution=self._resolution(task),
                                            # Thời lượng riêng cho Omni của project (heartbeat
                                            # gửi `omniDuration`), không có thì theo video_duration.
                                            duration=(task.get('omniDuration') or task.get('video_duration')
                                                      or omni_be.DEFAULT_DURATION))
         key = f'omni-{task_id}-{int(time.time() * 1000)}'
-        r = self.tab.evaluate(omni_be.call_expr('kick', key, json.dumps(body, ensure_ascii=False),
-                                                st['apiKey'], st.get('serverToken') or '',
-                                                omni_be.GENERATE_TIMEOUT_SECS * 1000), timeout=30) or {}
-        if not r.get('ok'):
-            raise RuntimeError(f'không bắn được generate: {r}')
+        # (2026-10-06) `api_fake_typing` (dùng chung với VEO): lệnh tạo vẫn đi bằng API
+        # nhưng trước đó gõ prompt vào ô "Mô tả video" như người thật, bắn xong thì xoá
+        # chữ để chuẩn bị cho task kế tiếp. Chỉ gõ + xoá, KHÔNG bấm Tạo.
+        fake = None
+        if int(get_local_settings().get('api_fake_typing', 0) or 0) and prompt:
+            from .omni_dom import OmniDom
+            fake = OmniDom(self.tab, self._log)
+            fake.fake_type(prompt)
+        try:
+            r = self.tab.evaluate(omni_be.call_expr('kick', key, json.dumps(body, ensure_ascii=False),
+                                                    st['apiKey'], st.get('serverToken') or '',
+                                                    omni_be.GENERATE_TIMEOUT_SECS * 1000), timeout=30) or {}
+            if not r.get('ok'):
+                raise RuntimeError(f'không bắn được generate: {r}')
+        finally:
+            if fake:
+                # Lệnh API đã rời đi — nghỉ vài giây như người vừa bấm xong rồi xoá chữ.
+                time.sleep(2 + random.random() * 2)
+                fake.fake_clear()
+                self._log('info', '⌫ Đã xoá prompt trong ô Video AI sau khi gọi API')
         return key
 
     def _finish(self, task: dict, g: dict, elapsed: float):
@@ -609,7 +678,8 @@ class OmniLane:
         r = self._step('tải video', lambda: self.tab.evaluate(
             omni_be.call_expr('fetchB64', urls[0]), timeout=180) or {}, ok=lambda x: x.get('b64'))
         data = base64.b64decode(r['b64'])
-        self._step('gửi kết quả về server', lambda: self.w._upload_video_result(task_id, data, source='omni') or True)
+        self._step('gửi kết quả về server', lambda: self.w._upload_video_result(
+            task_id, data, source='omni', resolution=self._resolution(task)) or True)
         self.done_count += 1; self._refused_streak = 0
         try:
             pm.bump_task_stat(self.profile_id, 'done')

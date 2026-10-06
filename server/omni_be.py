@@ -71,17 +71,30 @@ QUOTA_CONTEXT = [1, None, [[None, '1', 1189]]]
 # vài lần, không tái hiện được theo điều kiện cụ thể) → huỷ sau chừng này.
 GENERATE_TIMEOUT_SECS = 300
 
-# Tỉ lệ khung hình → settings[15][4] (capture thật: Khổ ngang=1, Khổ dọc=2).
+# Tỉ lệ khung hình + độ phân giải → settings[15][4]. ĐO THẬT 2026-10-06 (chạy API rồi
+# ffprobe file tải về): 1 = 720p ngang (1280x720), 2 = 720p dọc, 5 = 1080p ngang
+# (1920x1080), 6 = 1080p dọc (1080x1920). Tức là 1080p KHÔNG cần upscale riêng — chỉ
+# việc gửi mã 5/6. (Nút "Tăng độ phân giải" trên giao diện chỉ để nâng video 720p.)
 ASPECT_LANDSCAPE = 1
 ASPECT_PORTRAIT = 2
+RESOLUTION_1080_OFFSET = 4
+RESOLUTIONS = ('720p', '1080p')
 
 
-def aspect_code(aspect_ratio: str | None) -> int:
+def aspect_code(aspect_ratio: str | None, resolution: str | None = None) -> int:
     """Omni chỉ có Khổ ngang / Khổ dọc. '9:16' (và mọi tỉ lệ dọc) → dọc."""
     s = (aspect_ratio or '').replace(' ', '')
-    if s in ('9:16', '3:4', '4:5', '2:3') or 'portrait' in s.lower() or 'doc' in s.lower():
-        return ASPECT_PORTRAIT
-    return ASPECT_LANDSCAPE
+    portrait = s in ('9:16', '3:4', '4:5', '2:3') or 'portrait' in s.lower() or 'doc' in s.lower()
+    code = ASPECT_PORTRAIT if portrait else ASPECT_LANDSCAPE
+    if normalize_resolution(resolution) == '1080p':
+        code += RESOLUTION_1080_OFFSET
+    return code
+
+
+def normalize_resolution(resolution) -> str:
+    """'1080p' (mọi cách viết: 1080, 1080P, FHD) → '1080p'; còn lại → '720p'."""
+    v = str(resolution or '').strip().lower().rstrip('p')
+    return '1080p' if v in ('1080', 'fhd', 'full hd', 'fullhd') else '720p'
 
 
 def clamp_duration(seconds) -> int:
@@ -126,7 +139,8 @@ def build_generate_body(prompt: str,
                         aspect_ratio: str | None = None,
                         duration: int | None = None,
                         lang: str = 'en',
-                        client_id: str | None = None) -> list:
+                        client_id: str | None = None,
+                        resolution: str | None = None) -> list:
     """Dựng body `genai/generate` tạo video Omni.
 
     `ingredients`: list `(ing_uuid, blob_id, label)` — tối đa 3 (cắt bớt nếu dư).
@@ -160,7 +174,7 @@ def build_generate_body(prompt: str,
 
     # settings[15] = [0, 12, null, 0, <tỉ lệ>, null, null, null, <số giây>]
     # (ô 0/1/3 giữ nguyên từ capture — Omni/720p; chưa thấy UI đổi được).
-    settings = [None] * 15 + [[0, 12, None, 0, aspect_code(aspect_ratio), None, None, None,
+    settings = [None] * 15 + [[0, 12, None, 0, aspect_code(aspect_ratio, resolution), None, None, None,
                                clamp_duration(duration)]]
 
     feature = FEATURE_INGREDIENTS_TO_VIDEO if ings else FEATURE_TEXT_TO_VIDEO

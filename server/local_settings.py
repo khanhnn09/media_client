@@ -69,6 +69,12 @@ def _clamp(settings: dict) -> dict:
                 s[k] = _DEFAULT_SERVER_SETTINGS.get(k, 1)
 
 
+    if 'omni_mode' in s:
+        s['omni_mode'] = 'dom' if str(s['omni_mode']).strip().lower() == 'dom' else 'api'
+    if 'omni_resolution' in s:
+        v = str(s['omni_resolution']).strip().lower()
+        s['omni_resolution'] = v if v in ('project', '720p', '1080p') else 'project'
+
     if 'omni_max_concurrent' in s:
         try:
             s['omni_max_concurrent'] = max(1, min(int(s['omni_max_concurrent']), 5))

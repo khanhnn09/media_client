@@ -54,8 +54,8 @@ _TABS = [
     ('Tạo ảnh/video', [
         ('api_fake_typing',                'Profile API: gõ prompt giả người dùng', 'bool',
          'Trước mỗi lệnh gọi API, gõ prompt vào ô nhập của trang như người thật (KHÔNG bấm Gửi), '
-         'post API xong thì xoá chữ trong ô — lặp lại cho từng task. Chỉ tạo hoạt động giống người dùng '
-         'trên trang; việc tạo vẫn do API làm.'),
+         'post API xong thì xoá chữ trong ô — lặp lại cho từng task (áp dụng cả làn Omni: gõ vào ô '
+         '"Mô tả video" của Vids). Chỉ tạo hoạt động giống người dùng trên trang; việc tạo vẫn do API làm.'),
         ('api_fallback_to_dom',            'Profile API: lỗi API thì chuyển sang DOM', 'bool',
          'Mặc định tắt — profile API CHỈ chạy API, task lỗi báo về server. Bật = task lỗi API '
          '(hoặc không gọi được API) chạy lại ngay bằng DOM. Video đã gửi API thành công '
@@ -63,6 +63,13 @@ _TABS = [
         ('omni_max_concurrent',            'Omni: số task video đồng thời', 'int',
          'Làn Omni (Google Vids) chạy kèm profile VEO bật "Kết hợp chạy Omni" — số task video '
          'bắn cùng lúc trong tab Vids (1-5). Omni nhận tối đa 3 ảnh thành phần/task.'),
+        ('omni_mode',                      'Omni: cách tạo video (api / dom)', 'str',
+         'api = gọi thẳng API của Vids (nhanh, nhiều task song song, nhận ảnh thành phần). '
+         'dom = thao tác giao diện Vids như người dùng (mở panel Video AI, gõ prompt, chỉnh '
+         'cài đặt, bấm Tạo) — chạy từng task một, CHỈ text→video; task có ảnh vẫn chạy API.'),
+        ('omni_resolution',                'Omni: độ phân giải (project / 720p / 1080p)', 'str',
+         'project = theo cài đặt độ phân giải của project. 1080p tạo thẳng 1920x1080 (không cần '
+         'upscale riêng); 720p = 1280x720.'),
         ('gemini_send_via_rpc',            'Gemini: gửi ẩn qua RPC', 'bool',
          'Không gõ prompt vào ô nhập liệu. Có file đính kèm luôn dùng DOM.'),
         ('task_delay_secs',                'Delay giữa các task (giây)', 'int',
