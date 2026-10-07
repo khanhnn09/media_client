@@ -10,7 +10,7 @@ parser từng nằm ở đây đã xoá, chỉ giữ phần tra model. Tạo ả
 from __future__ import annotations
 
 # ─── Models — xem CLAUDE.md client_tool để biết nguồn gốc từng giá trị ─────────
-DEFAULT_IMAGE_MODEL = 'NARWHAL'
+DEFAULT_IMAGE_MODEL = 'BELUGA'   # "Nano Banana 2" → họ 2.1 (đọc catalog HTrJv 2026-10-07; trước là NARWHAL)
 DEFAULT_VIDEO_MODEL = 'veo_3_1_t2v_lite_low_priority'
 
 # Tên hiển thị (DB `tasks_media_flow.model` / `veo_models.name`) → videoModelKey.
@@ -56,7 +56,8 @@ def resolve_video_model_key(name: str | None, default: str = DEFAULT_VIDEO_MODEL
 # đoán) — cùng cấu trúc `_VIDEO_MODEL_LABEL_TO_KEY` ở trên:
 _IMAGE_MODEL_LABEL_TO_KEY = {
     'nano banana pro':      'GEM_PIX_2',
-    'nano banana 2':        'NARWHAL',
+    'nano banana 2':        'BELUGA',
+    'nano banana 2.1':      'BELUGA',
     'nano banana 2 lite':   'HARBOR_SEAL',
 }
 _IMAGE_MODEL_API_KEYS = frozenset(_IMAGE_MODEL_LABEL_TO_KEY.values())

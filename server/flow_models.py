@@ -174,11 +174,35 @@ def parse_catalog(payload):
                 })
             # ⚠️ `enabled` KHÔNG phải cờ phân quyền (xem docstring module) —
             # giữ lại chỉ để hiển thị, KHÔNG dùng để loại key.
-            out.append({'label': label, 'family_id': fid,
+            # fam[4] = tên CŨ của họ (vd họ "Nano Banana 2.1" mang alias [["Nano Banana 2"]]) —
+            # task lưu tên cũ vẫn phải tìm ra key mới.
+            aliases = []
+            try:
+                aliases = [a[0] for a in (fam[4] or []) if isinstance(a, list) and a and isinstance(a[0], str)]
+            except Exception:
+                pass
+            out.append({'label': label, 'family_id': fid, 'aliases': aliases,
                         'enabled': enabled is True, 'entries': items})
         return out
 
     return {'video': build(fams_video), 'image': build(fams_image)}
+
+
+def resolve_image_key(catalog, label):
+    """Key `imageModelName` THẬT theo catalog của tài khoản (khớp nhãn hiện tại HOẶC alias tên cũ).
+    `None` nếu catalog không có/không khớp — caller lui về bảng DB/cục bộ."""
+    want = _norm_label(label)
+    if not want or not catalog:
+        return None
+    fams = [f for f in (catalog.get('image') or []) if f.get('entries')
+            and not (f['entries'][0]['key'] or '').upper().startswith('GEM_PIX_2_UPSAMPLE')]
+    for f in fams:
+        if _norm_label(f['label']) == want:
+            return f['entries'][0]['key']
+    for f in fams:
+        if want in [_norm_label(a) for a in f.get('aliases') or []]:
+            return f['entries'][0]['key']
+    return None
 
 
 def _find_family(catalog, label, group='video'):

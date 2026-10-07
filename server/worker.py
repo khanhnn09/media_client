@@ -3148,7 +3148,12 @@ class SeleniumFlowWorker:
             ref_names = set(names)
             image_inputs = [flow_be.build_image_input_ref(n) for n in names]
 
-            image_model, model_src = model_catalog.resolve_image_model(task.get('model'))
+            # Ưu tiên catalog THẬT của tài khoản (Google đổi key là tự theo: "Nano Banana 2"
+            # nay là họ 2.1 → BELUGA); không có thì lui về DB `veo_models.model_key` / bảng cục bộ.
+            image_model = flow_models.resolve_image_key(self._flow_models_catalog(), task.get('model'))
+            model_src = 'catalog'
+            if not image_model:
+                image_model, model_src = model_catalog.resolve_image_model(task.get('model'))
             self._log('info', f'Task #{task["id"]} model="{task.get("model") or ""}" '
                               f'→ imageModelName={image_model} (nguồn: {model_src})')
             fresh = self._get_fresh_recaptcha('IMAGE_GENERATION') or captcha
