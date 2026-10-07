@@ -679,7 +679,8 @@ class OmniLane:
             omni_be.call_expr('fetchB64', urls[0]), timeout=180) or {}, ok=lambda x: x.get('b64'))
         data = base64.b64decode(r['b64'])
         self._step('gửi kết quả về server', lambda: self.w._upload_video_result(
-            task_id, data, source='omni', resolution=self._resolution(task)) or True)
+            task_id, data, source='omni', resolution=self._resolution(task),
+            machine_code=self.machine_code) or True)
         self.done_count += 1; self._refused_streak = 0
         try:
             pm.bump_task_stat(self.profile_id, 'done')

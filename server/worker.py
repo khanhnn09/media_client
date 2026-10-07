@@ -5491,7 +5491,7 @@ class SeleniumFlowWorker:
         return base64.b64decode(data)
 
     def _upload_video_result(self, task_id, video_bytes: bytes, filename: str = 'video.mp4',
-                             source: str = '', resolution: str = '') -> dict:
+                             source: str = '', resolution: str = '', machine_code: str = '') -> dict:
         """Upload trực tiếp bytes video làm kết quả task — dùng
         `/api/media/task/<id>/upload_result` (multipart, CÓ SẴN — dùng bởi
         tính năng "Thêm video thủ công" trên web, `_apply_media_to_task()` tự
@@ -5503,7 +5503,8 @@ class SeleniumFlowWorker:
         # video KHÔNG upscale được qua Flow (chỉ video VEO trong Flow mới upscale).
         src = source or ('gemini_video' if self.worker_mode == 'gemini_video' else 'upload')
         r = req_lib.post(url, files={'files': (filename, video_bytes, 'video/mp4')},
-                         data={'source': src, 'resolution': resolution}, timeout=120)
+                         data={'source': src, 'resolution': resolution,
+                               'machineCode': machine_code or self.machine_code}, timeout=120)
         r.raise_for_status()
         data = r.json()
         if not data.get('success', True):
@@ -5632,7 +5633,8 @@ class SeleniumFlowWorker:
         `status='done'`, giống hệt cơ chế "Render lại" dùng khắp NanoBananaPro."""
         url = f'{FLOW_SERVER}/api/media/task/{task_id}/upload_result'
         payload = [('files', f) for f in files]
-        r = req_lib.post(url, files=payload, data={'source': 'gemini_image'}, timeout=120)
+        r = req_lib.post(url, files=payload, data={'source': 'gemini_image', 'machineCode': self.machine_code},
+                         timeout=120)
         r.raise_for_status()
         data = r.json()
         if not data.get('success', True):
