@@ -54,6 +54,18 @@ class OmniDomError(RuntimeError):
     pass
 
 
+class OmniContentRejected(OmniDomError):
+    """Vids từ chối nội dung — thẻ video hỏng hiện lý do ("That request looks like it goes
+    against our terms…"). KHÔNG nên thử lại cùng nội dung: task cần đá về draft để sửa."""
+    def __init__(self, reason: str):
+        super().__init__(f'Vids từ chối nội dung: {reason}')
+        self.reason = reason
+
+
+# Thẻ video HỎNG trong feed có lớp CSS "Failedvideogenerationthumbnail…" (không phụ thuộc ngôn ngữ).
+_FAILED_MSG_SEL = '[class*=FailedvideogenerationthumbnailErrorMessage]:not([class*=MessageContainer])'
+
+
 class OmniDom:
     def __init__(self, tab, log=None):
         self.tab = tab
@@ -146,6 +158,27 @@ class OmniDom:
             return {'raw': label}
         return {'raw': label, 'model': m.group(1).strip(), 'res': m.group(2).lower(),
                 'aspect': m.group(3).strip().lower(), 'dur': int(m.group(4))}
+
+    def _failed_msgs(self) -> list:
+        """Lý do của các thẻ video HỎNG đang hiện trong feed (theo thứ tự DOM)."""
+        return self._eval(
+            "[...document.querySelectorAll(%s)].filter(e=>e.getBoundingClientRect().width>0)"
+            ".map(e=>(e.innerText||'').trim()).filter(Boolean)" % json.dumps(_FAILED_MSG_SEL)) or []
+
+    def _remove_failed_thumbs(self):
+        """Dọn thẻ hỏng khỏi feed (nút "Remove from feed" / "Xoá khỏi nguồn cấp") để không lẫn
+        với task kế tiếp. Best-effort."""
+        finder = ("[...document.querySelectorAll('[class*=FailedvideogenerationthumbnailErrorMessage]:not([class*=MessageContainer])')]"
+                  ".map(m=>{let p=m;for(let i=0;i<6&&p;i++){p=p.parentElement;"
+                  "const b=p&&[...p.querySelectorAll('button')].find(b=>b.getBoundingClientRect().width>0&&"
+                  "/(remove|xoá|xóa|delete)/i.test((b.innerText||'').trim().normalize('NFC')));if(b){b.scrollIntoView({block:'center'});return b}}return null})"
+                  ".find(Boolean)")
+        try:
+            for _ in range(6):
+                if not self._click(finder, 'nút Remove thẻ hỏng', 0.8):
+                    break
+        except Exception:
+            pass
 
     def _video_srcs(self) -> set:
         return set(self._eval(
@@ -338,7 +371,7 @@ class OmniDom:
         self._close_popup()
         got = self._chip_state() or {}
         if got.get('res') != want_res or self._is_portrait(got.get('aspect', '')) != aspect_portrait:
-            raise OmniDomError(f'DOM Omni: chip chưa đúng cài đặt — muốn {want_res}/{'dọc' if aspect_portrait else 'ngang'}, '
+            raise OmniDomError(f'DOM Omni: chip chưa đúng cài đặt — muốn {want_res}/{"dọc" if aspect_portrait else "ngang"}, '
                                f'đang {got.get("raw")}')
         if got.get('dur') != duration:
             self._log('warn', f'DOM Omni: thời lượng đang {got.get("dur")}s (muốn {duration}s)')
@@ -420,6 +453,7 @@ class OmniDom:
         `images`: [(bytes, mime, tên file)] ảnh thành phần đính kèm trước khi gõ prompt."""
         self.open_panel()
         before = self._video_srcs()
+        failed_before = len(self._failed_msgs())
         self._set_prompt(prompt)
         if images:
             self.add_ingredients(images)
@@ -434,6 +468,13 @@ class OmniDom:
             txt = (self._eval("document.body.innerText.normalize('NFC')") or '')
             busy = any(w in txt for w in _BUSY_WORDS)
             saw_progress = saw_progress or busy
+            # Thẻ video HỎNG mới (Vids từ chối nội dung / lỗi tạo) — đọc lý do rồi đá task về draft.
+            fails = self._failed_msgs()
+            if len(fails) > failed_before:
+                reason = fails[0]
+                self._log('warn', f'DOM Omni: thẻ video hỏng — "{reason[:200]}"')
+                self._remove_failed_thumbs()
+                raise OmniContentRejected(reason)
             new = [s for s in self._video_srcs() - before if 'usercontent.google.com' in s]
             if new and not busy:
                 return new[0]

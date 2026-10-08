@@ -461,7 +461,7 @@ class OmniLane:
 
     def _run_task_dom(self, t: dict):
         """Tạo 1 task bằng giao diện Vids (tuần tự, 1 task/lần — panel chỉ có 1 tiến trình)."""
-        from .omni_dom import OmniDom, OmniDomError
+        from .omni_dom import OmniDom, OmniDomError, OmniContentRejected
         task_id = t['id']
         prompt = (t.get('prompt_text') or t.get('title') or '').strip()
         self._log('info', f'▶ Task #{task_id} [DOM] mode={t.get("mode")} "{prompt[:70]}"')
@@ -477,12 +477,19 @@ class OmniLane:
                 r.raise_for_status()
                 mime = ((getattr(r, 'headers', None) or {}).get('content-type') or 'image/png').split(';')[0]
                 images.append((r.content, mime, f'ref_{i + 1}.' + ('jpg' if 'jpeg' in mime else 'png')))
+            # Lưu đầu vào để nếu Vids từ chối nội dung còn có prompt + ảnh mà xem (logs/omni_refused/).
+            self._inputs = getattr(self, '_inputs', {})
+            self._inputs[task_id] = {'prompt': prompt, 'mode': t.get('mode'), 'aspect_ratio': t.get('aspect_ratio'),
+                                     'duration': t.get('omniDuration') or t.get('video_duration'),
+                                     'images': [(u, m, b) for u, (b, m, _n) in zip(urls, images)]}
             portrait = omni_be.aspect_code(t.get('aspect_ratio')) == omni_be.ASPECT_PORTRAIT
             url = dom.generate(prompt, portrait, self._resolution(t),
                                omni_be.clamp_duration(t.get('omniDuration') or t.get('video_duration')
                                                       or omni_be.DEFAULT_DURATION),
                                timeout=_GENERATE_TIMEOUT_SECS, images=images)
             self._finish(t, {'status': 200, 'text': url}, time.time() - t0)
+        except OmniContentRejected as e:
+            self._reject(t, e)
         except OmniDomError as e:
             self._fail(t, e)
         except Exception as e:
@@ -736,9 +743,45 @@ class OmniLane:
         except Exception as e:
             self._log('warn', f'Không lưu được dữ liệu task bị từ chối: {e}')
 
+    def _reject(self, task: dict, err):
+        """Vids từ chối nội dung (thẻ video hỏng có lý do). Thử lại cùng nội dung vô ích →
+        lưu log riêng của task (prompt + ảnh + lý do) và báo server ĐÁ VỀ DRAFT kèm lý do để
+        người dùng sửa prompt/ảnh. KHÔNG tính lỗi tài khoản, không nghỉ làn, không đổi tài liệu."""
+        tid = task['id']
+        reason = getattr(err, 'reason', None) or str(err)
+        if 'REQUEST_REFUSED' in reason:
+            reason = ('Google/Vids từ chối request (REQUEST_REFUSED — bộ lọc nội dung / điều khoản). '
+                      f'Phản hồi: {reason[:200]}')
+        inp = (getattr(self, '_inputs', {}) or {}).get(tid) or {}
+        ctx = (f'prompt {len(inp.get("prompt") or "")} ký tự, {len(inp.get("images") or [])} ảnh, '
+               f'tỉ lệ {inp.get("aspect_ratio")}, {inp.get("duration")}s, '
+               f'{self._resolution(task)}, tài liệu {self.doc_url or "?"}')
+        self._dump_refused(tid, f'Vids từ chối nội dung: {reason}')
+        (getattr(self, '_inputs', {}) or {}).pop(tid, None)
+        self._log('error', f'✘ Task #{tid}: Vids từ chối — đá về draft. Lý do: {reason[:300]}')
+        self._log('warn', f'   ↳ Ngữ cảnh: {ctx}')
+        self._log('warn', f'   ↳ Prompt: "{(inp.get("prompt") or "")[:160]}"')
+        self.error_count += 1
+        try:
+            pm.bump_task_stat(self.profile_id, 'error')
+        except Exception:
+            pass
+        try:
+            self.w._req('POST', f'{FLOW_SERVER}/api/media/task/error',
+                        body={'taskId': tid, 'machineCode': self.machine_code, 'toDraft': True,
+                              'errorMessage': f'[Omni] Vids từ chối nội dung: {reason}'[:1000]})
+        except Exception as e:
+            self._log('warn', f'Báo draft về server lỗi: {e}')
+
     def _fail(self, task: dict, err):
         msg = str(err)
         refused = 'REQUEST_REFUSED' in msg
+        if refused:
+            # Cùng lỗi với thẻ "That request looks like it goes against our terms" của giao diện:
+            # nội dung bị từ chối → thử lại vô ích → đá về draft kèm lý do + lưu log riêng của task.
+            self._refused_streak = 0
+            self._reject(task, msg)
+            return
         if refused:
             self._dump_refused(task['id'], msg)
         self._refused_streak = self._refused_streak + 1 if refused else 0
