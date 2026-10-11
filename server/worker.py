@@ -2501,6 +2501,13 @@ class SeleniumFlowWorker:
         be_info = self._call_video_api_be(task, captcha, names)
         if not be_info:
             raise RuntimeError(self._be_fail_msg(f'Tạo video (mode={mode})'))
+        # Nhớ mediaId để sau này hỏi `jwpduf` xem video có LỖI không (tile lỗi
+        # không nằm trong listing nên reconcile không thấy) — xem
+        # `_check_video_failures()`.
+        if be_info.get('mediaId'):
+            if not hasattr(self, '_submitted_media'):
+                self._submitted_media = {}
+            self._submitted_media[task['id']] = be_info['mediaId']
         return be_info
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -3524,6 +3531,34 @@ class SeleniumFlowWorker:
                            f'{max_wait}s — refresh luôn (safety-net, tránh chờ vô hạn '
                            'nếu DOM đổi markup hoặc tile kẹt thật)')
 
+    def _check_video_failures(self, task_ids) -> dict:
+        """Hỏi `jwpduf` cho các task video đã submit API; trả `{task_id: lý do}`
+        cho video Flow đã báo THẤT BẠI (vd "Không tạo được âm thanh", được hoàn
+        credit). Best-effort — lỗi mạng/không có session thì bỏ qua."""
+        media = getattr(self, '_submitted_media', None) or {}
+        todo = {t: media[t] for t in task_ids if t in media}
+        if not todo:
+            return {}
+        out = {}
+        try:
+            session = self._be_session()
+            if not session:
+                return {}
+            for tid, mid in todo.items():
+                raw = self._batchexecute_call(flow_be.RPC_CHECK_VIDEO_STATUS,
+                                              [None, None, [[mid]]], session, timeout=30)
+                if not raw:
+                    continue
+                payload = self._batchexecute_parse(raw, flow_be.RPC_CHECK_VIDEO_STATUS)
+                reason = flow_be.parse_video_failure(payload, mid)
+                if reason:
+                    self._log('warn', f'jwpduf Task #{tid} media={mid}: {reason} '
+                                      f'| raw={json.dumps(payload, ensure_ascii=False)[:400]}')
+                    out[tid] = reason
+        except Exception as e:
+            self._log('warn', f'Không kiểm tra được trạng thái video (jwpduf): {e}')
+        return out
+
     def _wait_and_reconcile_tasks(self, tasks_by_id: dict, max_rounds: int = 10,
                                   wait_tiles: bool = True) -> set:
         """Lặp: chờ → `_reconcile_project_media(pending)` → task matched thì
@@ -3552,6 +3587,15 @@ class SeleniumFlowWorker:
                                  f'(vòng {round_i}/{max_rounds})')
                 self._handle_task_success()
             pending -= matched
+            if pending and not wait_tiles:
+                # API video: tile lỗi không có trong listing → hỏi trạng thái
+                # từng media, lỗi thì báo error task NGAY (không chờ hết vòng).
+                for tid, reason in self._check_video_failures(pending).items():
+                    msg = f'{reason} (Flow đã hoàn credit — task sẽ thử lại)'
+                    self._log('error', f'Task #{tid} lỗi: {msg}')
+                    self._report_task_error(tid, msg)
+                    self._handle_task_error(msg)
+                    pending.discard(tid)
             if pending:
                 self._log('info', f'reconcile: vòng {round_i}/{max_rounds} — còn '
                                    f'{len(pending)}/{len(tasks_by_id)} task chưa xong')

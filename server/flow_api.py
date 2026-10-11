@@ -21,6 +21,10 @@ _VIDEO_MODEL_LABEL_TO_KEY = {
     'veo 3.1 - lite':                  'veo_3_1_t2v_lite',
     'veo 3.1 - fast':                  'veo_3_1_t2v_fast',
     'veo 3.1 - quality':               'veo_3_1_t2v',
+    # (2026-10-11) Omni — catalog thật: họ "Omni 1.1 Flash" (alias cũ "Omni Flash")
+    # key `abra_{t2v,r2v,i2v}_{4,6,8,10}s`; t2v->r2v swap vẫn đúng (abra_r2v_8s).
+    'omni 1.1 flash':                  'abra_t2v_8s',
+    'omni flash':                      'abra_t2v_8s',
 }
 _VIDEO_MODEL_API_KEYS = frozenset(_VIDEO_MODEL_LABEL_TO_KEY.values())
 
@@ -41,7 +45,7 @@ def resolve_video_model_key(name: str | None, default: str = DEFAULT_VIDEO_MODEL
     raw = (name or '').strip()
     if not raw:
         return default
-    if raw in _VIDEO_MODEL_API_KEYS or raw.startswith('veo_') or '_t2v_' in raw:
+    if raw in _VIDEO_MODEL_API_KEYS or raw.startswith(('veo_', 'abra_')) or '_t2v_' in raw:
         return raw
     return _VIDEO_MODEL_LABEL_TO_KEY.get(_norm_video_model_label(raw)) or default
 

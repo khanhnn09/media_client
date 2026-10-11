@@ -217,6 +217,11 @@ def _find_family(catalog, label, group='video'):
     for f in fams:
         if _norm_label(f['label']) == want:
             return f
+    # Tên CŨ của họ (vd "Omni Flash" -> họ "Omni 1.1 Flash"; task lưu tên cũ
+    # vẫn phải tìm ra key mới) — khớp chính xác alias trước khi khớp lỏng.
+    for f in fams:
+        if want in [_norm_label(a) for a in f.get('aliases') or []]:
+            return f
     # Chỉ chấp nhận khớp chứa-nhau khi DUY NHẤT 1 ứng viên (không mơ hồ)
     loose = [f for f in fams
              if want in _norm_label(f['label']) or _norm_label(f['label']) in want]

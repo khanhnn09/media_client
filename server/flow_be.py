@@ -331,6 +331,46 @@ def parse_video_status(payload, media_name: str):
     return None
 
 
+def parse_video_failure(payload, media_name: str):
+    """Video ĐÃ LỖI chưa? Trả `None` nếu chưa lỗi / không tìm thấy media,
+    ngược lại trả chuỗi lý do (2026-10-11).
+
+    Tile lỗi KHÔNG nằm trong listing `Zzl0ze` (chỉ hiện trên UI "Không thành
+    công … bạn sẽ được hoàn tín dụng") nên reconcile không bao giờ thấy — phải
+    hỏi `jwpduf`. Shape đã THẤY thật: media không còn dữ liệu →
+    `item[5][8] = [4, [None, "Operation data for media not found."], [...]]`.
+    Mã 1/2 = đang chạy, 3 = xong, số khác = lỗi (cùng quy ước
+    `parse_video_status`). ⚠️ Shape của lỗi lúc RENDER (vd "Không tạo được âm
+    thanh") chưa bắt được — nên ngoài mã số còn coi có chuỗi thông báo trong
+    `item[5][8]` là lỗi, và lý do rơi về chuỗi dài nhất tìm được."""
+    try:
+        for item in (payload[2] or []):
+            if not (isinstance(item, list) and item and item[0] == media_name):
+                continue
+            meta = item[5] if len(item) > 5 and isinstance(item[5], list) else []
+            st = meta[8] if len(meta) > 8 else None
+            if not (isinstance(st, list) and st and isinstance(st[0], int)):
+                return None
+            msgs = []
+
+            def _walk(x):
+                if isinstance(x, str):
+                    msgs.append(x)
+                elif isinstance(x, list):
+                    for y in x:
+                        _walk(y)
+            _walk(st[1:])
+            if st[0] in (1, 2, 3) and not msgs:
+                return None
+            if st[0] == 3:      # xong mà vẫn kèm chuỗi — không coi là lỗi
+                return None
+            reason = max(msgs, key=len) if msgs else ''
+            return f'Flow báo video thất bại (mã {st[0]})' + (f': {reason}' if reason else '')
+    except Exception:
+        pass
+    return None
+
+
 def find_video_url(payload) -> str:
     for u in _CDN_URL_RE.findall(json.dumps(payload).replace('\u003d', '=').replace('\u0026', '&')):
         u = u.replace('\u003d', '=').replace('\u0026', '&')
