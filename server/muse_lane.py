@@ -113,7 +113,7 @@ def assign_media(tasks: list, media: list, order_fallback: bool = False) -> dict
         for k in keys:                       # mã đầu prompt trước, rồi mã m<id>
             hit = next((m for m in left
                         if re.search(r'(?<![a-z0-9])' + re.escape(k) + r'(?![a-z0-9])',
-                                     (m.get('label') or '').lower())), None)
+                                     (m.get('label') or '').lower().replace('_', '-'))), None)
             if hit:
                 break
         if hit:
@@ -189,7 +189,7 @@ _MEDIA_JS = """(function(){
   var out = [];
   // Nhãn đổi theo ngôn ngữ giao diện Muse: "Mở video …"/"Open animated video …",
   // "Mở hình ảnh đã tạo …"/"Open generated image …" — nhận cả hai, phân loại theo thẻ con.
-  var LAB = /^(Mở |Open )/i;
+  var LAB = /^(Mở |Open |View |Xem )|image|hình ảnh|video/i;
   document.querySelectorAll('[aria-label]').forEach(function(b){
     var l = b.getAttribute('aria-label') || '';
     if (!LAB.test(l)) return;
