@@ -29,6 +29,7 @@ _ENGINE_BADGE = {
     'gemini_video': ('🎬 Gemini Video', 'purple'),
     # (2026-09-09) — engine THỨ 2 cho task ẢNH, mirror gemini_video
     'gemini_image': ('🖼️ Gemini Ảnh',  'purple'),
+    'muse':         ('🎨 Muse AI',      'purple'),
 }
 _TASK_MODE_ENGINE_BADGE = {
     'all':         ('🖼️🎬 VEO3',      'blue'),
@@ -303,6 +304,8 @@ class ProfilesPage(QWidget):
                 elif worker_mode == 'gemini_video':
                     sub_parts.append('Tạo video qua chat')
                     if max_conc > 1: sub_parts.append(f'x{max_conc}')
+                elif worker_mode == 'muse':
+                    sub_parts.append('muse.ai · ảnh + video')
                 else:  # gemini_image
                     sub_parts.append('Tạo ảnh qua chat')
                     if max_conc > 1: sub_parts.append(f'x{max_conc}')
@@ -473,7 +476,7 @@ class ProfilesPage(QWidget):
                 # worker_mode='gemini'/'chatgpt'/'gemini_video'/'gemini_image'
                 # không cần project_url (Flow project) — chỉ VEO3 (api/dom) mới cần.
                 is_enabled = bool(p.get('enabled', 1))
-                can_start = is_enabled and (worker_mode in ('gemini', 'chatgpt', 'gemini_video', 'gemini_image')
+                can_start = is_enabled and (worker_mode in ('gemini', 'chatgpt', 'gemini_video', 'gemini_image', 'muse')
                                              or bool(p.get('project_url')))
                 if not is_enabled:
                     start_tip = 'Profile đang TẮT — sửa profile để bật lại trước khi Start'

@@ -75,6 +75,23 @@ def _clamp(settings: dict) -> dict:
         v = str(s['omni_resolution']).strip().lower()
         s['omni_resolution'] = v if v in ('project', '720p', '1080p') else 'project'
 
+    if 'muse_batch_size' in s:
+        try:
+            s['muse_batch_size'] = max(1, min(int(s['muse_batch_size']), 5))
+        except (TypeError, ValueError):
+            s['muse_batch_size'] = _DEFAULT_SERVER_SETTINGS['muse_batch_size']
+    for k in ('muse_task_gap_secs', 'muse_batch_gap_secs', 'muse_image_timeout', 'muse_video_timeout'):
+        if k in s:
+            try:
+                s[k] = max(0, int(float(s[k])))
+            except (TypeError, ValueError):
+                s[k] = _DEFAULT_SERVER_SETTINGS[k]
+    if 'muse_name_token' in s:
+        s['muse_name_token'] = 1 if str(s['muse_name_token']).strip().lower() in ('1', 'true', 'yes', 'on') else 0
+    for k in ('muse_prefix_video', 'muse_prefix_image', 'muse_aspect_suffix'):
+        if k in s:
+            s[k] = str(s[k]) if s[k] is not None else _DEFAULT_SERVER_SETTINGS[k]
+
     if 'omni_max_concurrent' in s:
         try:
             s['omni_max_concurrent'] = max(1, min(int(s['omni_max_concurrent']), 5))

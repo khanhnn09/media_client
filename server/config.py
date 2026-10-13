@@ -150,6 +150,17 @@ _DEFAULT_SERVER_SETTINGS = {
     'omni_max_concurrent': 1,
     'omni_mode': 'api',          # 'api' = gọi genai/generate | 'dom' = thao tác giao diện Vids (chỉ text→video)
     'omni_resolution': 'project',  # 'project' = theo project (video_resolution) | '720p' | '1080p'
+    # (2026-10-11) Làn Muse AI (muse.ai) chạy kèm profile bật "Kết hợp chạy Muse AI" —
+    # xem server/muse_lane.py. Tạo ảnh + video qua giao diện chat.
+    'muse_batch_size':     2,    # số task gửi đồng thời trong 1 lô (1-5)
+    'muse_task_gap_secs': 5,     # khoảng cách giữa 2 task liên tiếp TRONG 1 lô (giây)
+    'muse_batch_gap_secs': 30,   # khoảng cách giữa 2 lô (giây, tính từ lúc gửi lô trước)
+    'muse_prefix_video':   'I want to create a video of ',
+    'muse_prefix_image':   'I want to create an image of ',
+    'muse_aspect_suffix':  ', aspect ratio {ratio}',   # {ratio} = tỉ lệ khung hình project (16:9…)
+    'muse_name_token':     1,    # kèm mã m<task_id> để gán kết quả về đúng task
+    'muse_image_timeout':  300,  # giây chờ ảnh
+    'muse_video_timeout':  600,  # giây chờ video
     # 2026-09-24: mở trình duyệt bằng CloakBrowser (luồng riêng server/cloak_browser.py)
     'use_cloakbrowser': 0,
     'cloak_geoip':      1,   # = launch(geoip=True): múi giờ + ngôn ngữ + WebRTC theo IP proxy

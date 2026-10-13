@@ -11,6 +11,7 @@ from server.run_hours import parse_run_hours, summarize_run_hours
 
 from .style import C
 from .widgets import btn, lbl, sep
+from .api_client import api_sync
 
 
 class ProfileDialog(QDialog):
@@ -159,7 +160,8 @@ class ProfileDialog(QDialog):
         self._type.addItem('ChatGPT — Chat + upload ảnh',            'chatgpt')
         self._type.addItem('🎬 Gemini — Tạo Video (mới, thay VEO3)', 'gemini_video')
         self._type.addItem('🖼️ Gemini — Tạo Ảnh (mới, thay VEO3)',  'gemini_image')
-        _type_idx = {'gemini': 1, 'chatgpt': 2, 'gemini_video': 3, 'gemini_image': 4}.get(cur_worker_mode, 0)
+        self._type.addItem('🎨 Muse AI — Tạo Ảnh + Video (muse.ai)',  'muse')
+        _type_idx = {'gemini': 1, 'chatgpt': 2, 'gemini_video': 3, 'gemini_image': 4, 'muse': 5}.get(cur_worker_mode, 0)
         self._type.setCurrentIndex(_type_idx)
         self._type.currentIndexChanged.connect(self._on_type_change)
 
@@ -234,6 +236,37 @@ class ProfileDialog(QDialog):
             _cb.setChecked(_k in _on_fp)
             _fp_lay.addWidget(_cb)
             self._fp_checks[_k] = _cb
+
+        # — Extension Chrome của profile (2026-10-12) — danh sách extension đã thêm ở trang
+        # Extensions (vd Urban VPN), tick = nạp vào profile này khi mở Chrome. Áp dụng MỌI loại
+        # profile. Lưu cục bộ (flag `extension_ids`), xem `em.paths_for()`.
+        self._ext_checks = {}
+        self._ext_touched = False
+        self._ext_w = QWidget()
+        _ext_lay = QVBoxLayout(self._ext_w)
+        _ext_lay.setContentsMargins(0, 0, 0, 0)
+        _ext_lay.setSpacing(2)
+        _exts = api_sync('GET', '/api/selenium/extensions')
+        _exts = _exts if isinstance(_exts, list) else []
+        _saved_ext = (self._p or {}).get('extension_ids')
+        _saved_set = None if _saved_ext is None else {x.strip() for x in str(_saved_ext).split(',') if x.strip()}
+        for _e in _exts:
+            _on = bool(_e.get('enabled', 1))
+            _cb = QCheckBox(_e.get('ext_name') or f"Extension {_e.get('id')}" + ('' if _on else ' (đang tắt ở trang Extensions)'))
+            _cb.setToolTip(_e.get('ext_path') or '')
+            _cb.setEnabled(_on)
+            if _saved_set is not None:
+                _cb.setChecked(_on and str(_e.get('id')) in _saved_set)
+            _cb.toggled.connect(lambda *_: setattr(self, '_ext_touched', True))
+            _ext_lay.addWidget(_cb)
+            self._ext_checks[str(_e.get('id'))] = _cb
+        if not self._ext_checks:
+            _none = QLabel('Chưa có extension nào — thêm ở trang Extensions.')
+            _none.setStyleSheet(f'color:{C["muted"]}; font-size:11px; background:transparent;')
+            _ext_lay.addWidget(_none)
+        # Chưa từng chọn (profile cũ / profile mới): mặc định theo loại — VEO3 nạp mọi extension
+        # đang bật (như trước nay), loại khác không nạp. Đổi Loại thì áp lại nếu chưa chạm tay.
+        self._ext_auto = _saved_set is None
 
         # — Khung giờ chạy (2026-09-17, chỉ VEO3) — 24 ô 0..23, ô `h` = nhận task
         # trong khoảng h:00-h:59 theo giờ máy này. Không tick ô nào = chạy liên tục.
@@ -398,6 +431,7 @@ class ProfileDialog(QDialog):
         f_hours.addRow(label('Đổi fingerprint'), self._fp_w)
 
         f_misc.addRow(label('Proxy'),   self._proxy)
+        f_misc.addRow(label('Extension'), self._ext_w)
         f_misc.addRow(label('Ghi chú'), self._notes)
 
         self._tabs = QTabWidget()
@@ -456,6 +490,8 @@ class ProfileDialog(QDialog):
             # Flow URL/Task mode/Worker mode (cố định trong get_data()).
             'gemini_video': [self._gemini_attach_to, self._gemini_resp_to, self._max_concurrent],
             'gemini_image': [self._gemini_attach_to, self._gemini_resp_to, self._max_concurrent],
+            # muse (2026-10-11) — không field riêng: cỡ lô/khoảng cách/tiền tố ở Cài đặt → Muse AI.
+            'muse':         [],
         }
         self._on_type_change()
 
@@ -506,6 +542,16 @@ class ProfileDialog(QDialog):
         # khoảng trống. `_fit_height()` tự no-op trước khi dialog dựng xong.
         self._fit_height()
 
+    def _apply_default_exts(self):
+        """Chưa từng chọn extension + chưa chạm tay: VEO3 tick mọi extension đang bật, loại khác bỏ tick."""
+        if not getattr(self, '_ext_auto', False) or getattr(self, '_ext_touched', False):
+            return
+        veo = self._type.currentData() == 'veo3'
+        for cb in self._ext_checks.values():
+            cb.blockSignals(True)
+            cb.setChecked(veo and cb.isEnabled())
+            cb.blockSignals(False)
+
     def _on_type_change(self, *_):
         """Ẩn/hiện option riêng của từng loại (VEO3 / Gemini / ChatGPT) — cả field
         lẫn label (lấy qua form.labelForField, không phụ thuộc setRowVisible mới
@@ -535,6 +581,7 @@ class ProfileDialog(QDialog):
                     lb.setVisible(vis)
         # Tab "Giờ chạy" chỉ có ý nghĩa với VEO3.
         self._tabs.setTabVisible(self._hours_tab_index, current == 'veo3')
+        self._apply_default_exts()
         self._fit_height()
 
     def _fit_height(self):
@@ -607,6 +654,8 @@ class ProfileDialog(QDialog):
             'account_password': self._password.text(),
             'account_totp_secret': self._totp.text().replace(' ', '').strip(),
             'notes':         self._notes.text().strip(),
+            # Extension tick chọn cho profile (CSV id; '' = không nạp gì) — lưu cục bộ.
+            'extension_ids': ','.join(i for i, cb in self._ext_checks.items() if cb.isChecked()),
             'enabled':       self._enabled_chk.isChecked(),
             # Proxy áp dụng cho MỌI loại profile — đặt ở dict CHUNG (không nằm
             # trong nhánh if/elif theo `current`) để không phải lặp lại 4 lần.
@@ -640,6 +689,11 @@ class ProfileDialog(QDialog):
             data['gemini_attach_timeout']   = int(self._gemini_attach_to.text().strip() or 180)
             data['gemini_response_timeout'] = int(self._gemini_resp_to.text().strip() or 300)
             data['max_concurrent'] = self._max_concurrent.value()
+        elif current == 'muse':
+            data['worker_mode'] = 'muse'
+            data['project_url'] = ''            # dùng muse.ai, không phải Flow project
+            data['task_mode']   = 'all'         # nhận cả ảnh lẫn video
+            data['max_concurrent'] = 1
         else:
             data['worker_mode']    = self._worker_mode.currentText()
             data['project_url']    = self._url.text().strip()

@@ -407,7 +407,8 @@ def _build_chrome_options(profile_dir: str,
                            detach: bool = False,
                            use_uc: bool = False,
                            proxy: str = '',
-                           profile_id=None):
+                           profile_id=None,
+                           profile: dict | None = None):
     """Tạo ChromeOptions chuẩn.
     use_uc=True: dùng uc.ChromeOptions (bỏ experimental options mà uc tự quản lý).
 
@@ -492,7 +493,11 @@ def _build_chrome_options(profile_dir: str,
     opts.add_argument('--window-size=1280,800')
     opts.add_argument('--log-level=3')
 
-    ext_paths = list(em.active_paths()) if load_extensions else []
+    # (2026-10-12) Có `profile` → theo extension profile đó đã chọn (`em.paths_for`).
+    if profile is not None:
+        ext_paths = list(em.paths_for(profile, load_extensions))
+    else:
+        ext_paths = list(em.active_paths()) if load_extensions else []
 
     # Proxy riêng của profile (2026-09-05). Extension proxy-auth (nếu proxy có
     # user/pass) phải nạp KỂ CẢ khi load_extensions=False — cờ đó chỉ để tắt

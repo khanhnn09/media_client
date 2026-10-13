@@ -40,7 +40,7 @@ def _start_worker(profile: dict):
     # tương ứng (gemini_video/gemini_image cũng dùng gemini.google.com, chỉ
     # khác "Tạo video" hoặc chat ảnh thường thay vì chat text thường — xem
     # worker.py::_run_task_gemini_video/_run_task_gemini_image).
-    if (profile.get('worker_mode') not in ('gemini', 'chatgpt', 'gemini_video', 'gemini_image')
+    if (profile.get('worker_mode') not in ('gemini', 'chatgpt', 'gemini_video', 'gemini_image', 'muse')
             and not profile.get('project_url') and not _bind_enabled()):
         return 'project_url_required'
     w = SeleniumFlowWorker(profile)
@@ -271,6 +271,9 @@ def _profile_veo3_eligible(profile: dict, pending: dict) -> bool:
     if worker_mode in ('api', 'dom') and profile.get('id') is not None:
         if (pending.get('upscaleByMachine') or {}).get(f"selenium-{profile['id']}"):
             return True
+    if worker_mode == 'muse':
+        # (2026-10-11) Profile loại Muse AI nhận ẢNH + VIDEO của project bật `enable_muse`.
+        return (pending.get('museTotal') or 0) > 0
     if worker_mode == 'gemini_image':
         total = pending.get('imageTotalGeminiImage')
         if total is None:
@@ -321,11 +324,11 @@ def _profile_veo3_eligible(profile: dict, pending: dict) -> bool:
 # `task_mode='image_only'` (ép ở ProfileDialog.get_data()) — rơi đúng vào
 # nhánh `image_only`/`image_budget`, cạnh tranh CÙNG pool ảnh với VEO3
 # `task_mode='image_only'`.
-_VEO3_LIKE_WORKER_MODES = ('api', 'dom', 'gemini_video', 'gemini_image')
+_VEO3_LIKE_WORKER_MODES = ('api', 'dom', 'gemini_video', 'gemini_image', 'muse')
 
 # 2 worker_mode không có "project" Flow (gemini.google.com thay vì labs.google/
 # flow.google.com) — dùng ở nhiều chỗ cần loại trừ yêu cầu `project_url`.
-_NO_PROJECT_WORKER_MODES = ('gemini_video', 'gemini_image')
+_NO_PROJECT_WORKER_MODES = ('gemini_video', 'gemini_image', 'muse')
 
 
 # (2026-09-17) Profile VEO đang NGOÀI khung giờ chạy riêng (`run_hours`) — chỉ để
@@ -366,8 +369,11 @@ def _worker_busy(w) -> bool:
     if (w._current_task is not None or getattr(w, '_upscale_busy', False)
             or getattr(w, '_batch_active', False)):
         return True
-    lane = getattr(w, '_omni', None)
-    return bool(lane and lane.busy)
+    for name in ('_omni', '_muse'):
+        lane = getattr(w, name, None)
+        if lane and lane.busy:
+            return True
+    return False
 
 
 def _auto_scale_veo3_tick():
@@ -529,6 +535,8 @@ def _veo3_dispatcher_tick():
     omni_budget          = pending.get('videoTotalOmni')
     if omni_budget is None:
         omni_budget = video_budget
+    # (2026-10-11) Profile loại Muse AI ăn backlog Muse riêng (`museTotal`).
+    muse_budget          = pending.get('museTotal') or 0
     # (2026-09-14) Chế độ gán project + email — profile VEO (api/dom) chỉ ăn
     # backlog của ĐÚNG email mình (`byFlowEmail`), nên ngân sách cũng phải tính
     # RIÊNG theo email, không trừ vào `image_budget`/`video_budget` chung.
@@ -560,6 +568,9 @@ def _veo3_dispatcher_tick():
             continue
         wm = running_profile.get('worker_mode')
         tm = running_profile.get('task_mode') or 'all'
+        if wm == 'muse':
+            muse_budget -= 1           # profile loại Muse → ăn backlog Muse
+            continue
         if wm in ('api', 'dom') and not _veo_on(running_profile):
             omni_budget -= 1           # chỉ Omni → ăn backlog Omni
             continue
@@ -581,9 +592,11 @@ def _veo3_dispatcher_tick():
     gemini_image_budget  = max(0, gemini_image_budget)
     gemini_video_budget  = max(0, gemini_video_budget)
     omni_budget          = max(0, omni_budget)
+    muse_budget          = max(0, muse_budget)
 
     img_wait, vid_wait, all_wait, gemini_img_wait, gemini_vid_wait = [], [], [], [], []
     omni_wait = []
+    muse_wait = []
     bound_wait = []
     for pid in waiting_pids:
         profile = pm.get(pid)
@@ -596,7 +609,9 @@ def _veo3_dispatcher_tick():
             continue
         wm = profile.get('worker_mode')
         tm = profile.get('task_mode') or 'all'
-        if wm in ('api', 'dom') and not _veo_on(profile):
+        if wm == 'muse':
+            muse_wait.append(profile)  # ngân sách Muse riêng
+        elif wm in ('api', 'dom') and not _veo_on(profile):
             omni_wait.append(profile)  # chỉ Omni → ngân sách Omni riêng
         elif bind and wm in ('api', 'dom'):
             bound_wait.append(profile)
@@ -638,6 +653,11 @@ def _veo3_dispatcher_tick():
             break
         to_promote.append(profile)
         omni_budget -= 1
+    for profile in muse_wait:
+        if len(to_promote) >= slots_free or muse_budget <= 0:
+            break
+        to_promote.append(profile)
+        muse_budget -= 1
     # combined_budget tính SAU KHI 2 nhóm trên đã lấy phần của mình — phần
     # CÒN LẠI mới là thứ 'all' được cạnh tranh, trừ thêm phần profile 'all'
     # ĐANG CHẠY coi như đã tiêu thụ (best-effort, không biết chính xác đang xử

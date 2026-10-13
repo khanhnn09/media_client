@@ -25,6 +25,7 @@ from . import model_catalog
 from . import flow_models
 from .run_hours import in_run_hours, summarize_run_hours
 from .omni_lane import OmniLane, omni_enabled_for, veo_enabled_for
+from .muse_lane import MuseLane
 from .upscale_lane import UpscaleLane
 from .chrome_utils import (
     _chrome_alive_on_port, _chrome_running_for_profile, _kill_chrome_for_profile,
@@ -476,10 +477,11 @@ class SeleniumFlowWorker:
         self.machine_code = f'selenium-{profile["id"]}'
         # (2026-09-27) Làn Omni On Workspace chạy kèm VEO — xem server/omni_lane.py
         self._omni = None
+        self._muse = None         # làn Muse AI (muse_lane.py) — cửa sổ Chrome riêng vào muse.ai
         self._upscale_lane = None     # làn upscale 1080p chạy song song (upscale_lane.py)
         self._omni_relogin_at = 0.0
         self.worker_mode = profile.get('worker_mode') or 'api'
-        if self.worker_mode not in ('api', 'dom', 'gemini', 'chatgpt', 'gemini_video', 'gemini_image'):
+        if self.worker_mode not in ('api', 'dom', 'gemini', 'chatgpt', 'gemini_video', 'gemini_image', 'muse'):
             self.worker_mode = 'api'
         self.driver      = None
         self._stop       = threading.Event()
@@ -758,8 +760,8 @@ class SeleniumFlowWorker:
         # kỳ đoạn nào bên dưới. Tắt setting thì luồng cũ chạy y nguyên.
         self._cloak_human = None
         from .cloak_browser import cloak_enabled, open_cloak_driver, cloak_launch_config, CloakHuman
-        if cloak_enabled():
-            load_ext = self.worker_mode not in ('gemini', 'chatgpt', 'gemini_video', 'gemini_image')
+        if cloak_enabled(self.profile):
+            load_ext = self.worker_mode not in ('gemini', 'chatgpt', 'gemini_video', 'gemini_image', 'muse')
             driver = open_cloak_driver(self.profile, port, load_extensions=load_ext, log_fn=self._log)
             try:
                 driver.execute_cdp_cmd('Network.enable', {})
@@ -838,8 +840,8 @@ class SeleniumFlowWorker:
         # Selenium, không phụ thuộc extension nào — tắt load_extensions để tránh
         # Flow Automation extension (nếu có trong profile) cùng lúc heartbeat/thao
         # tác DOM, gây race condition với tab chat của worker này.
-        load_ext = self.worker_mode not in ('gemini', 'chatgpt', 'gemini_video', 'gemini_image')
-        ext_paths = em.active_paths() if load_ext else []
+        load_ext = self.worker_mode not in ('gemini', 'chatgpt', 'gemini_video', 'gemini_image', 'muse')
+        ext_paths = em.paths_for(self.profile, load_ext)
         if ext_paths:
             self._log('info', f'Loading {len(ext_paths)} extension(s)')
 
@@ -861,6 +863,7 @@ class SeleniumFlowWorker:
                     use_uc          = True,
                     proxy           = self.profile.get('proxy_server') or '',
                     profile_id      = self.profile_id,
+                    profile         = self.profile,
                 )
                 cdp_path = _detect_chromedriver() or None
                 # version_main (2026-07-20) — ép uc dùng ĐÚNG major version Chrome
@@ -905,6 +908,7 @@ class SeleniumFlowWorker:
                 detach          = False,
                 proxy           = self.profile.get('proxy_server') or '',
                 profile_id      = self.profile_id,
+                profile         = self.profile,
             )
             driver = webdriver.Chrome(service=_make_service(chrome_binary=portable_exe), options=opts)
             self._log('info', f'Chrome opened via regular webdriver (port={port})')
@@ -7111,6 +7115,42 @@ class SeleniumFlowWorker:
                     except Exception: pass
             pm.set_status(self.profile_id, 'idle', clear_task=True, pid=threading.get_ident())
 
+    def _run_muse_loop(self):
+        """(2026-10-11) Profile loại "Muse AI" — vào muse.ai bằng tab chính và để `MuseLane`
+        (server/muse_lane.py) nhận + tạo task ẢNH/VIDEO bằng giao diện chat. Vòng ngoài chỉ giữ
+        Chrome sống và canh làn (giống profile chỉ-Omni)."""
+        self._log('info', 'Worker starting (Muse AI mode)')
+        pm.set_status(self.profile_id, 'idle', pid=threading.get_ident())
+        try:
+            self.driver = self._make_driver()
+            lane = MuseLane(self)
+            if not lane.start():
+                self._log('error', 'Làn Muse không khởi động được — thoát worker')
+                return
+            self._muse = lane
+            self._log('ok', 'Muse AI mode — sẵn sàng nhận task (không check đăng nhập — tự attach Chrome đang mở, bạn tự đăng nhập muse.ai trước)')
+            while not self._stop.is_set():
+                if not self._is_driver_alive():
+                    self._log('warn', 'Browser đã đóng — thoát worker loop')
+                    break
+                self._drain_browser_logs()
+                if not lane.running:
+                    self._log('warn', 'Làn Muse đã dừng — thoát worker loop')
+                    break
+                self._stop.wait(POLL_INTERVAL)
+        except Exception as e:
+            self._log('error', f'Worker fatal: {e}')
+        finally:
+            if self._muse:
+                self._muse.stop()
+            if self.driver:
+                try:
+                    self.driver.quit()
+                except Exception:
+                    pass
+            pm.set_status(self.profile_id, 'offline', clear_task=True, pid=None)
+            self._log('info', 'Worker stopped')
+
     def _run_chatgpt_loop(self):
         """Main loop riêng cho worker_mode='chatgpt' (không dùng chung run() của
         Flow/Gemini). Sequential 1-tab — mirror `_run_gemini_loop()`."""
@@ -7621,7 +7661,7 @@ class SeleniumFlowWorker:
             clean_dir = None
             try:
                 from .cloak_browser import cloak_enabled, cloak_profile_dir
-                if cloak_enabled():
+                if cloak_enabled(self.profile):
                     clean_dir = cloak_profile_dir(self.profile)
             except Exception:
                 pass
@@ -8052,7 +8092,7 @@ class SeleniumFlowWorker:
             if not int(self._server_settings.get('cloak_rotate_fp_on_block', 0) or 0):
                 return
             from .cloak_browser import cloak_enabled, rotate_fingerprint, parse_fp_aspects
-            cloak = cloak_enabled()
+            cloak = cloak_enabled(self.profile)
             aspects = parse_fp_aspects((self.profile or {}).get('fp_aspects'))
             lines = rotate_fingerprint(self.profile_id, aspects, cloak)
             kind = 'CloakBrowser' if cloak else 'Chrome'
@@ -9135,6 +9175,8 @@ class SeleniumFlowWorker:
     # ── Worker main loop ──────────────────────────────────────────────────────
 
     def run(self):
+        if self.worker_mode == 'muse':
+            return self._run_muse_loop()
         if self.worker_mode == 'gemini':
             return self._run_gemini_loop()
         if self.worker_mode == 'chatgpt':

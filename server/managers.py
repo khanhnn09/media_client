@@ -90,6 +90,21 @@ class _ExtensionManager:
     def active_paths(self) -> list:
         return [e['ext_path'] for e in self.list() if e.get('enabled')]
 
+    def paths_for(self, profile: dict | None, load_default: bool = True) -> list:
+        """Đường dẫn extension Chrome sẽ nạp cho 1 PROFILE (2026-10-12).
+
+        Profile đã chọn extension riêng (`extension_ids` — CSV id, '' = không nạp gì) thì CHỈ
+        nạp đúng các extension đó (vẫn phải đang bật ở trang Extensions), kể cả loại profile
+        mặc định không nạp extension (Gemini/ChatGPT/Muse). Profile CHƯA từng chọn
+        (`extension_ids` là None — profile cũ) giữ hành vi cũ: nạp mọi extension đang bật nếu
+        `load_default`, ngược lại không nạp."""
+        ids = (profile or {}).get('extension_ids')
+        if ids is None:
+            return self.active_paths() if load_default else []
+        want = {s.strip() for s in str(ids).split(',') if s.strip()}
+        return [e['ext_path'] for e in self.list()
+                if e.get('enabled') and str(e.get('id')) in want]
+
 
 em = _ExtensionManager()
 
@@ -456,6 +471,9 @@ def _merge_local_flags(row):
         # (2026-10-03) Mục fingerprint sẽ đổi khi bị chặn — CHỈ lưu cục bộ
         # (CSV; rỗng = đổi tất cả). Xem cloak_browser.FP_ASPECTS.
         row['fp_aspects'] = loc.get('fp_aspects') or ''
+        # (2026-10-12) Extension chọn riêng cho profile — CHỈ lưu cục bộ (CSV id; '' = không nạp
+        # gì; None = chưa từng chọn → hành vi cũ). Xem `em.paths_for()`.
+        row['extension_ids'] = loc.get('extension_ids')
     return row
 
 
@@ -475,7 +493,7 @@ class _ProfileManager:
                gemini_max_concurrent_tabs=1, gemini_tab_switch_interval=0.5,
                chatgpt_attach_timeout=60, chatgpt_response_timeout=300,
                proxy_server='', run_hours='', totp_secret='', omni_enabled=0,
-               veo_enabled=1, fp_aspects='') -> int:
+               veo_enabled=1, fp_aspects='', extension_ids=None) -> int:
         profile_dir = str(Path(PROFILES_DIR) / name)
         os.makedirs(profile_dir, exist_ok=True)  # cục bộ — user-data-dir chỉ có ý nghĩa trên máy này
         # (2026-08-07) 'gemini_video' — BUG THẬT đã sót ở đây từ lúc thêm loại
@@ -486,7 +504,7 @@ class _ProfileManager:
         # khi gửi lên backend — phát hiện lúc thêm field mật khẩu (2026-08-08),
         # xem CLAUDE.md §11.30. (2026-09-09) Thêm 'gemini_image' NGAY TỪ ĐẦU
         # lúc viết engine mới này — tránh lặp lại đúng bug đã ghi ở trên.
-        if worker_mode not in ('api', 'dom', 'gemini', 'chatgpt', 'gemini_video', 'gemini_image'):
+        if worker_mode not in ('api', 'dom', 'gemini', 'chatgpt', 'gemini_video', 'gemini_image', 'muse'):
             worker_mode = 'api'
         if task_mode not in ('all', 'image_only', 'video_only'):
             task_mode = 'all'
@@ -518,6 +536,8 @@ class _ProfileManager:
             _set_local_flag(new_id, 'veo_enabled',
                             0 if (not veo_enabled and omni_enabled and worker_mode in ('api', 'dom')) else 1)
             _set_local_flag(new_id, 'fp_aspects', fp_aspects or '')
+            if extension_ids is not None:
+                _set_local_flag(new_id, 'extension_ids', str(extension_ids))
         return new_id
 
     def update(self, profile_id: int, **fields):
@@ -537,6 +557,8 @@ class _ProfileManager:
         if 'veo_enabled' in sets:
             sets['veo_enabled'] = 1 if sets['veo_enabled'] else 0
             _set_local_flag(profile_id, 'veo_enabled', sets['veo_enabled'])
+        if 'extension_ids' in fields and fields['extension_ids'] is not None:   # chỉ cục bộ
+            _set_local_flag(profile_id, 'extension_ids', str(fields['extension_ids']))
         if 'fp_aspects' in fields:        # chỉ cục bộ, không gửi backend
             _set_local_flag(profile_id, 'fp_aspects', fields['fp_aspects'] or '')
         if not sets:

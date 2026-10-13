@@ -70,6 +70,7 @@ def create_profile():
             omni_enabled                = d.get('omni_enabled', 0),
             veo_enabled                 = d.get('veo_enabled', 1),
             fp_aspects                  = d.get('fp_aspects', ''),
+            extension_ids               = d.get('extension_ids'),
         )
         return jsonify({'id': new_id, 'ok': True})
     except Exception as e:
@@ -145,7 +146,7 @@ def start_worker(pid):
     # (2026-09-14) Bật "chạy theo project + email" thì link Flow lấy theo project
     # Nano Banana của từng lô task — profile không cần project_url riêng.
     _bind_on = bool(int(get_local_settings().get('bind_tasks_to_project_email', 0) or 0))
-    if (profile.get('worker_mode') not in ('gemini_video', 'gemini_image')
+    if (profile.get('worker_mode') not in ('gemini_video', 'gemini_image', 'muse')
             and not profile.get('project_url') and not _bind_on):
         return jsonify({'error': 'project_url_required'}), 400
     # (2026-09-17) Profile VEO có khung giờ chạy riêng mà giờ này không nằm trong
@@ -245,7 +246,7 @@ def open_browser(pid):
 
         # CloakBrowser — luồng riêng (server/cloak_browser.py)
         from .cloak_browser import cloak_enabled, open_cloak_driver
-        if cloak_enabled():
+        if cloak_enabled(profile):
             driver = open_cloak_driver(profile, port, detach=True, load_extensions=True,
                                        log_fn=lambda lv, m: _profile_log(pid, lv, m))
             _login_drivers[pid] = driver
@@ -277,6 +278,7 @@ def open_browser(pid):
             detach          = True,   # Chrome sống khi driver.quit() — worker sẽ attach
             proxy           = profile.get('proxy_server') or '',
             profile_id      = pid,
+            profile         = profile,
         )
 
         driver = webdriver.Chrome(service=_make_service(chrome_binary=portable_exe), options=opts)

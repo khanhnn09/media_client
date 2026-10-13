@@ -65,8 +65,16 @@ def _settings() -> dict:
         return {}
 
 
-def cloak_enabled() -> bool:
-    """Đọc tươi mỗi lần gọi — bật/tắt áp dụng cho lần mở trình duyệt kế tiếp."""
+# Loại profile LUÔN dùng Chrome thường, bất kể setting `use_cloakbrowser`.
+# Muse AI (muse.ai, 2026-10-11): đăng nhập Meta trong Chrome thường của profile.
+_NO_CLOAK_WORKER_MODES = ('muse',)
+
+
+def cloak_enabled(profile: dict | None = None) -> bool:
+    """Đọc tươi mỗi lần gọi — bật/tắt áp dụng cho lần mở trình duyệt kế tiếp.
+    Truyền `profile` để loại trừ các loại profile luôn dùng Chrome thường (Muse AI)."""
+    if profile and (profile.get('worker_mode') in _NO_CLOAK_WORKER_MODES):
+        return False
     return bool(int(_settings().get('use_cloakbrowser') or 0))
 
 
@@ -395,7 +403,7 @@ def build_cloak_options(profile: dict, debug_port: int, load_extensions: bool = 
         '--disable-renderer-backgrounding', '--disable-background-timer-throttling',
         '--disable-backgrounding-occluded-windows',
     ]
-    ext_paths = list(em.active_paths()) if load_extensions else []
+    ext_paths = list(em.paths_for(profile, load_extensions))
 
     args = build_args(True, extra, timezone=tz, locale=locale, headless=False,
                       extension_paths=ext_paths or None,

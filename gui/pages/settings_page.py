@@ -26,6 +26,41 @@ _TABS = [
     ('Chung', [
         ('max_concurrent_veo3_profiles',   'Số profile VEO chạy đồng thời', 'int',
          'Tối đa bao nhiêu profile VEO (api/dom) được mở cùng lúc.'),
+        ('api_fake_typing',                'Profile API: gõ prompt giả người dùng', 'bool',
+         'Trước mỗi lệnh gọi API, gõ prompt vào ô nhập của trang như người thật (KHÔNG bấm Gửi), '
+         'post API xong thì xoá chữ trong ô — lặp lại cho từng task (áp dụng cả làn Omni: gõ vào ô '
+         '"Mô tả video" của Vids). Chỉ tạo hoạt động giống người dùng trên trang; việc tạo vẫn do API làm.'),
+        ('api_fallback_to_dom',            'Profile API: lỗi API thì chuyển sang DOM', 'bool',
+         'Mặc định tắt — profile API CHỈ chạy API, task lỗi báo về server. Bật = task lỗi API '
+         '(hoặc không gọi được API) chạy lại ngay bằng DOM. Video đã gửi API thành công '
+         'không chuyển DOM (tránh tạo trùng).'),
+        ('task_delay_secs',                'Delay giữa các task (giây)', 'int',
+         'Dùng cho luồng tuần tự (DOM).'),
+        ('thread_stagger_min_secs',        'Giãn cách thread — tối thiểu (giây)', 'float',
+         'Chờ ngẫu nhiên trước khi khởi động task API kế tiếp.'),
+        ('thread_stagger_max_secs',        'Giãn cách thread — tối đa (giây)', 'float', ''),
+        ('upscale_gap_secs',               'Giãn cách upscale 1080p (giây)', 'float', 'Khoảng cách giữa 2 lệnh upscale video trong Flow'),
+        ('submit_pause_every',             'Nghỉ sau mỗi N lần gửi (API)', 'int',
+         'Cứ gửi N lệnh tạo ảnh/video thì nghỉ 1 lần. 0 = tắt.'),
+        ('submit_pause_secs',              'Thời gian nghỉ đó (giây)', 'int', ''),
+        ('step_delay_min_secs',            'Delay giữa các bước — tối thiểu (giây)', 'float', ''),
+        ('step_delay_max_secs',            'Delay giữa các bước — tối đa (giây)', 'float', ''),
+        ('max_project_media_items',        'Số media tối đa / project', 'int',
+         'Đạt ngưỡng thì tự tạo project Flow mới. 0 = tắt.'),
+    ]),
+    ('Omni', [
+        ('omni_max_concurrent',            'Omni: số task video đồng thời', 'int',
+         'Làn Omni (Google Vids) chạy kèm profile VEO bật "Kết hợp chạy Omni" — số task video '
+         'bắn cùng lúc trong tab Vids (1-5). Omni nhận tối đa 3 ảnh thành phần/task.'),
+        ('omni_mode',                      'Omni: cách tạo video (api / dom)', 'str',
+         'api = gọi thẳng API của Vids (nhanh, nhiều task song song, nhận ảnh thành phần). '
+         'dom = thao tác giao diện Vids như người dùng (mở panel Video AI, gõ prompt, chỉnh '
+         'cài đặt, bấm Tạo) — chạy từng task một, CHỈ text→video; task có ảnh vẫn chạy API.'),
+        ('omni_resolution',                'Omni: độ phân giải (project / 720p / 1080p)', 'str',
+         'project = theo cài đặt độ phân giải của project. 1080p tạo thẳng 1920x1080 (không cần '
+         'upscale riêng); 720p = 1280x720.'),
+    ]),
+    ('Gemini', [
         ('max_concurrent_gemini_profiles', 'Số profile Gemini chạy đồng thời', 'int',
          'Chỉ mở khi có việc Gemini đang chờ.'),
         ('quiet_hours_enabled',            'Bật khung giờ không nhận task', 'bool',
@@ -52,39 +87,30 @@ _TABS = [
          'Chuột đi đường cong, gõ phím theo nhịp người thật khi thao tác giao diện (như launch(humanize=True)).'),
     ]),
     ('Tạo ảnh/video', [
-        ('api_fake_typing',                'Profile API: gõ prompt giả người dùng', 'bool',
-         'Trước mỗi lệnh gọi API, gõ prompt vào ô nhập của trang như người thật (KHÔNG bấm Gửi), '
-         'post API xong thì xoá chữ trong ô — lặp lại cho từng task (áp dụng cả làn Omni: gõ vào ô '
-         '"Mô tả video" của Vids). Chỉ tạo hoạt động giống người dùng trên trang; việc tạo vẫn do API làm.'),
-        ('api_fallback_to_dom',            'Profile API: lỗi API thì chuyển sang DOM', 'bool',
-         'Mặc định tắt — profile API CHỈ chạy API, task lỗi báo về server. Bật = task lỗi API '
-         '(hoặc không gọi được API) chạy lại ngay bằng DOM. Video đã gửi API thành công '
-         'không chuyển DOM (tránh tạo trùng).'),
-        ('omni_max_concurrent',            'Omni: số task video đồng thời', 'int',
-         'Làn Omni (Google Vids) chạy kèm profile VEO bật "Kết hợp chạy Omni" — số task video '
-         'bắn cùng lúc trong tab Vids (1-5). Omni nhận tối đa 3 ảnh thành phần/task.'),
-        ('omni_mode',                      'Omni: cách tạo video (api / dom)', 'str',
-         'api = gọi thẳng API của Vids (nhanh, nhiều task song song, nhận ảnh thành phần). '
-         'dom = thao tác giao diện Vids như người dùng (mở panel Video AI, gõ prompt, chỉnh '
-         'cài đặt, bấm Tạo) — chạy từng task một, CHỈ text→video; task có ảnh vẫn chạy API.'),
-        ('omni_resolution',                'Omni: độ phân giải (project / 720p / 1080p)', 'str',
-         'project = theo cài đặt độ phân giải của project. 1080p tạo thẳng 1920x1080 (không cần '
-         'upscale riêng); 720p = 1280x720.'),
         ('gemini_send_via_rpc',            'Gemini: gửi ẩn qua RPC', 'bool',
          'Không gõ prompt vào ô nhập liệu. Có file đính kèm luôn dùng DOM.'),
-        ('task_delay_secs',                'Delay giữa các task (giây)', 'int',
-         'Dùng cho luồng tuần tự (DOM).'),
-        ('thread_stagger_min_secs',        'Giãn cách thread — tối thiểu (giây)', 'float',
-         'Chờ ngẫu nhiên trước khi khởi động task API kế tiếp.'),
-        ('thread_stagger_max_secs',        'Giãn cách thread — tối đa (giây)', 'float', ''),
-        ('upscale_gap_secs',               'Giãn cách upscale 1080p (giây)', 'float', 'Khoảng cách giữa 2 lệnh upscale video trong Flow'),
-        ('submit_pause_every',             'Nghỉ sau mỗi N lần gửi (API)', 'int',
-         'Cứ gửi N lệnh tạo ảnh/video thì nghỉ 1 lần. 0 = tắt.'),
-        ('submit_pause_secs',              'Thời gian nghỉ đó (giây)', 'int', ''),
-        ('step_delay_min_secs',            'Delay giữa các bước — tối thiểu (giây)', 'float', ''),
-        ('step_delay_max_secs',            'Delay giữa các bước — tối đa (giây)', 'float', ''),
-        ('max_project_media_items',        'Số media tối đa / project', 'int',
-         'Đạt ngưỡng thì tự tạo project Flow mới. 0 = tắt.'),
+    ]),
+    ('Muse AI', [
+        ('muse_batch_size',                'Số task gửi đồng thời / lô', 'int',
+         'Mỗi lô gửi bấy nhiêu yêu cầu liên tiếp vào chat Muse rồi chờ đủ kết quả (1-5). '
+         'Lô sau chỉ bắt đầu khi lô trước xong VÀ đủ khoảng cách bên dưới.'),
+        ('muse_task_gap_secs',             'Khoảng cách giữa các task trong lô (giây)', 'int',
+         'Nghỉ bấy nhiêu giây giữa 2 lần gửi task liên tiếp trong cùng 1 lô (0 = gửi liền).'),
+        ('muse_batch_gap_secs',            'Khoảng cách giữa 2 lô (giây)', 'int',
+         'Tính từ lúc gửi lô trước tới lúc nhận lô kế (giây). Lô chạy lâu hơn thì không chờ thêm.'),
+        ('muse_prefix_video',              'Tiền tố prompt VIDEO', 'str',
+         'Gắn vào ĐẦU prompt của task video. Mặc định: "I want to create a video of ".'),
+        ('muse_prefix_image',              'Tiền tố prompt ẢNH', 'str',
+         'Gắn vào ĐẦU prompt của task ảnh. Mặc định: "I want to create an image of ".'),
+        ('muse_aspect_suffix',             'Hậu tố tỉ lệ khung hình', 'str',
+         'Gắn vào CUỐI prompt, {ratio} = tỉ lệ project đã chọn (16:9, 9:16…). '
+         'Mặc định ", aspect ratio {ratio}". Để trống = không thêm.'),
+        ('muse_name_token',                'Kèm mã TASK_<id>: đầu prompt', 'bool',
+         'Như VEO: prompt gửi Muse mang "TASK_<id>:" ngay sau tiền tố để gán kết quả về đúng task '
+         '(Muse đặt tên file theo mã đầu prompt). Tắt = gán theo mã gốc trong prompt (CUE_…/SCENE_…) '
+         'rồi theo thứ tự — kém chắc chắn.'),
+        ('muse_image_timeout',             'Chờ ảnh tối đa (giây)', 'int', ''),
+        ('muse_video_timeout',             'Chờ video tối đa (giây)', 'int', ''),
     ]),
     ('Lỗi & phục hồi', [
         ('error_sleep_secs',                 'Thời gian ngủ khi escalation (giây)', 'int', ''),
