@@ -70,6 +70,7 @@ def create_profile():
             omni_enabled                = d.get('omni_enabled', 0),
             veo_enabled                 = d.get('veo_enabled', 1),
             fp_aspects                  = d.get('fp_aspects', ''),
+            bind_project_email          = d.get('bind_project_email', 0),
             extension_ids               = d.get('extension_ids'),
         )
         return jsonify({'id': new_id, 'ok': True})
@@ -145,7 +146,8 @@ def start_worker(pid):
     # project_url.
     # (2026-09-14) Bật "chạy theo project + email" thì link Flow lấy theo project
     # Nano Banana của từng lô task — profile không cần project_url riêng.
-    _bind_on = bool(int(get_local_settings().get('bind_tasks_to_project_email', 0) or 0))
+    from .managers import bind_enabled_for
+    _bind_on = bind_enabled_for(profile)
     if (profile.get('worker_mode') not in ('gemini_video', 'gemini_image', 'muse')
             and not profile.get('project_url') and not _bind_on):
         return jsonify({'error': 'project_url_required'}), 400

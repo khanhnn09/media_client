@@ -222,6 +222,12 @@ class ProfileDialog(QDialog):
                                   '1 bên VEO, 1 bên Omni — Omni CHỈ nhận task video.\n'
                                   'Omni nhận tối đa 3 ảnh thành phần; tỉ lệ ngang/dọc; 3-10 giây.')
         self._omni_chk.setChecked(bool(int((self._p or {}).get('omni_enabled') or 0)))
+        self._bind_chk = QCheckBox('Chỉ chạy task theo project + email')
+        self._bind_chk.setToolTip('Profile này chỉ nhận task của project Nano Banana gán ĐÚNG email của nó, '
+                                  'vào đúng link Flow đã gán và dùng lại id ảnh đã lưu làm tham chiếu.\n'
+                                  'Tắt = nhận task như thường, dùng project_url riêng.')
+        self._bind_chk.setChecked(bool(int((self._p or {}).get('bind_project_email') or 0)))
+        self._bind_row = self._bind_chk
         self._engines_w = QWidget()
         _eng = QHBoxLayout(self._engines_w)
         _eng.setContentsMargins(0, 0, 0, 0)
@@ -430,6 +436,7 @@ class ProfileDialog(QDialog):
         f_task.addRow(label('Worker mode'),      self._worker_mode)
         f_task.addRow(label('Task nhận đồng thời'), self._max_concurrent)
         f_task.addRow(label('Engine chạy'),      self._engines_w)
+        f_task.addRow(label('Theo project+email'), self._bind_row)
         f_task.addRow(label('Attach timeout'),   self._gemini_attach_to)
         f_task.addRow(label('Response timeout'), self._gemini_resp_to)
         f_task.addRow(label('Số tab đồng thời'), self._gemini_max_tabs)
@@ -491,7 +498,7 @@ class ProfileDialog(QDialog):
         # "Attach timeout" nhưng là 2 widget RIÊNG — ẩn/hiện theo widget nên không nhầm.
         self._type_fields = {
             'veo3':         [self._url, self._task_mode, self._worker_mode, self._max_concurrent,
-                             self._engines_w, self._run_hours_w, self._fp_w],
+                             self._engines_w, self._bind_row, self._run_hours_w, self._fp_w],
             'gemini':       [self._gemini_attach_to, self._gemini_resp_to,
                               self._gemini_max_tabs, self._gemini_tab_interval],
             'chatgpt':      [self._chatgpt_attach_to, self._chatgpt_resp_to],
@@ -712,12 +719,14 @@ class ProfileDialog(QDialog):
             data['run_hours']      = ','.join(str(h) for h in self._checked_hours())
             data['omni_enabled']   = 1 if self._omni_chk.isChecked() else 0
             data['veo_enabled']    = 1 if self._veo_chk.isChecked() else 0
+            data['bind_project_email'] = 1 if self._bind_chk.isChecked() else 0
             _sel = [k for k, cb in self._fp_checks.items() if cb.isChecked()]
             data['fp_aspects'] = '' if len(_sel) == len(self._fp_checks) else ','.join(_sel)
         if current != 'veo3':
             data['run_hours'] = ''   # khung giờ chạy chỉ áp dụng VEO3
             data['omni_enabled'] = 0 # Omni chỉ chạy kèm VEO3
             data['veo_enabled'] = 1
+            data['bind_project_email'] = 0
         return data
 
 

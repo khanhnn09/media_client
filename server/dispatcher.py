@@ -5,7 +5,7 @@ import threading, time
 from datetime import datetime, time as dtime
 
 from .config import FLOW_SERVER, log, req_lib
-from .managers import pm
+from .managers import pm, bind_enabled_for
 from .worker import SeleniumFlowWorker
 from .local_settings import get_local_settings
 from .run_hours import in_run_hours, summarize_run_hours
@@ -41,7 +41,7 @@ def _start_worker(profile: dict):
     # khác "Tạo video" hoặc chat ảnh thường thay vì chat text thường — xem
     # worker.py::_run_task_gemini_video/_run_task_gemini_image).
     if (profile.get('worker_mode') not in ('gemini', 'chatgpt', 'gemini_video', 'gemini_image', 'muse')
-            and not profile.get('project_url') and not _bind_enabled()):
+            and not profile.get('project_url') and not bind_enabled_for(profile)):
         return 'project_url_required'
     w = SeleniumFlowWorker(profile)
     t = threading.Thread(target=w.run, daemon=True, name=f'sel-worker-{pid}')
@@ -223,17 +223,6 @@ def _fetch_pending_by_mode() -> dict:
     return _pending_cache['data'] or {'byMode': {}, 'imageTotal': 0, 'videoTotal': 0, 'total': 0}
 
 
-def _bind_enabled() -> bool:
-    """(2026-09-14) Cài đặt "Chỉ chạy task theo project + email" đang bật? — xem
-    `config.py::bind_tasks_to_project_email`. Bật thì profile VEO (api/dom)
-    KHÔNG cần `project_url` riêng (link Flow lấy từ project Nano Banana của task)
-    và backlog tính theo ĐÚNG email của từng profile (`byFlowEmail`)."""
-    try:
-        return bool(int(get_local_settings().get('bind_tasks_to_project_email', 0) or 0))
-    except (TypeError, ValueError):
-        return False
-
-
 def _email_backlog(profile: dict, pending: dict) -> dict:
     """Backlog của project gán ĐÚNG email profile này — `{imageTotal, videoTotal,
     total}` (0 hết nếu backend cũ chưa trả `byFlowEmail` hoặc profile không có
@@ -289,7 +278,7 @@ def _profile_veo3_eligible(profile: dict, pending: dict) -> bool:
     # (2026-09-14) Chế độ gán project + email: profile VEO chỉ được giao task của
     # project gán đúng email của nó (heartbeat.py `binding_clause`) — phải xét
     # đúng backlog đó, không phải backlog chung (vốn đã loại project đã gán).
-    if worker_mode in ('api', 'dom') and _bind_enabled():
+    if bind_enabled_for(profile):
         pending = _email_backlog(profile, pending)
     # (2026-09-27) Profile VEO bật "Kết hợp chạy Omni" — làn Omni nhận task video
     # bất kể task_mode của làn VEO, nên có backlog video là đủ lý do mở profile.
@@ -416,7 +405,7 @@ def _auto_scale_veo3_tick():
                     _stop_worker(pid)
             continue
         if (profile.get('worker_mode') not in _NO_PROJECT_WORKER_MODES
-                and not profile.get('project_url') and not _bind_enabled()):
+                and not profile.get('project_url') and not bind_enabled_for(profile)):
             continue
         if not _run_hours_gate(profile):
             continue
@@ -540,7 +529,6 @@ def _veo3_dispatcher_tick():
     # (2026-09-14) Chế độ gán project + email — profile VEO (api/dom) chỉ ăn
     # backlog của ĐÚNG email mình (`byFlowEmail`), nên ngân sách cũng phải tính
     # RIÊNG theo email, không trừ vào `image_budget`/`video_budget` chung.
-    bind = _bind_enabled()
     email_budget: dict = {}
 
     def _eb(prof: dict) -> dict:
@@ -574,7 +562,7 @@ def _veo3_dispatcher_tick():
         if wm in ('api', 'dom') and not _veo_on(running_profile):
             omni_budget -= 1           # chỉ Omni → ăn backlog Omni
             continue
-        elif bind and wm in ('api', 'dom'):
+        elif bind_enabled_for(running_profile) and wm in ('api', 'dom'):
             _eb_take(running_profile)
             continue
         if wm == 'gemini_image':
@@ -613,7 +601,7 @@ def _veo3_dispatcher_tick():
             muse_wait.append(profile)  # ngân sách Muse riêng
         elif wm in ('api', 'dom') and not _veo_on(profile):
             omni_wait.append(profile)  # chỉ Omni → ngân sách Omni riêng
-        elif bind and wm in ('api', 'dom'):
+        elif bind_enabled_for(profile) and wm in ('api', 'dom'):
             bound_wait.append(profile)
         elif wm == 'gemini_image':
             gemini_img_wait.append(profile)

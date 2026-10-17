@@ -324,6 +324,8 @@ class ProfilesPage(QWidget):
                     engine_badge = Badge('🎬 Chỉ Omni', 'purple')
                     sub_parts = ['Omni (Google Vids) · chỉ task video']
                 # (2026-09-17) Khung giờ chạy riêng — rỗng = chạy liên tục, không hiện.
+                if int(p.get('bind_project_email') or 0):
+                    sub_parts.append('🔗 Theo project+email')
                 hours_span = summarize_run_hours(p.get('run_hours'))
                 if hours_span:
                     sub_parts.append(f'⏰ {hours_span}')

@@ -1163,7 +1163,7 @@ class SeleniumFlowWorker:
         if getattr(self, 'worker_mode', '') not in ('api', 'dom'):
             return False
         try:
-            return bool(int(get_local_settings().get('bind_tasks_to_project_email', 0) or 0))
+            return bool(int((getattr(self, 'profile', None) or {}).get('bind_project_email') or 0))
         except (TypeError, ValueError):
             return False
 

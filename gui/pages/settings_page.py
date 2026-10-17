@@ -24,6 +24,27 @@ from ..api_client import api
 # 'bool' = checkbox (lưu 0/1). Server validate lại lần nữa ở `_clamp()`.
 _TABS = [
     ('Chung', [
+        ('quiet_hours_enabled',            'Bật khung giờ không nhận task', 'bool',
+         'Tự tắt nhận task trong khung giờ bên dưới, hết giờ tự bật lại.'),
+        ('quiet_hours_start',              'Bắt đầu (HH:MM)', 'str', ''),
+        ('quiet_hours_end',                'Kết thúc (HH:MM)', 'str',
+         'Hỗ trợ khung vắt qua nửa đêm, vd 22:00 → 06:00.'),
+        ('google_login_check_enabled',     'Check đăng nhập Google trước khi vào trang', 'bool',
+         'Tắt = vào thẳng trang nhận task. Bật = tự phát hiện và tự đăng nhập lại nếu bị đăng xuất.'),
+        ('use_cloakbrowser',               'Chạy bằng CloakBrowser (chống "hoạt động bất thường")', 'bool',
+         'Luồng RIÊNG, không dùng undetected_chromedriver. Thư mục profile riêng (<profile>_cloak) — '
+         'lần đầu phải "Mở login browser" đăng nhập lại. Lần đầu tự tải ~550MB. '
+         'Áp dụng khi mở trình duyệt kế tiếp (Stop rồi Start profile).'),
+        ('cloak_geoip',                    'Cloak: geoip', 'bool',
+         'Khớp múi giờ + ngôn ngữ + IP WebRTC theo IP ra của proxy (như launch(geoip=True)).'),
+        ('cloak_rotate_fp_on_block',       'Đổi fingerprint khi bị chặn (Cloak + Chrome)', 'bool',
+         'Khi Google trả lỗi PUBLIC_ERROR_UNUSUAL_ACTIVITY / USER_REQUESTS_THROTTLED: đổi seed '
+         'fingerprint của profile, đóng trình duyệt; lần mở kế tiếp dùng fingerprint mới. '
+         'Cloak: đổi seed fingerprint. Chrome thường: vá phần cứng ảo + nhiễu canvas (UA/WebGL giữ nguyên).'),
+        ('cloak_humanize',                 'Cloak: humanize', 'bool',
+         'Chuột đi đường cong, gõ phím theo nhịp người thật khi thao tác giao diện (như launch(humanize=True)).'),
+    ]),
+    ('Flow', [
         ('max_concurrent_veo3_profiles',   'Số profile VEO chạy đồng thời', 'int',
          'Tối đa bao nhiêu profile VEO (api/dom) được mở cùng lúc.'),
         ('api_fake_typing',                'Profile API: gõ prompt giả người dùng', 'bool',
@@ -47,6 +68,31 @@ _TABS = [
         ('step_delay_max_secs',            'Delay giữa các bước — tối đa (giây)', 'float', ''),
         ('max_project_media_items',        'Số media tối đa / project', 'int',
          'Đạt ngưỡng thì tự tạo project Flow mới. 0 = tắt.'),
+        ('error_sleep_secs',                 'Thời gian ngủ khi escalation (giây)', 'int', ''),
+        ('error_wait_secs',                  'Chờ sau lỗi trước khi thử lại (giây)', 'int', ''),
+        ('batch_fail_count_before_sleep',    'Batch lỗi liên tiếp → ngủ', 'int',
+         'Batch có ≥1 task thành công = batch thành công. Thời gian ngủ = "Thời gian ngủ khi escalation".'),
+        ('batch_sleep_wipe_cookies',         'Khi ngủ: xoá toàn bộ cookie/cache', 'bool',
+         'Bật = xoá hết cookie/cache (cả đăng nhập) rồi tự check/đăng nhập lại ở lần chạy sau. '
+         'Tắt = chỉ ngủ, giữ nguyên cookie/cache.'),
+        ('flow_block_cooldown_min_secs',     'Google chặn tài khoản: nghỉ tối thiểu (giây)', 'int',
+         'Khi Flow báo "hoạt động bất thường" (UNUSUAL_ACTIVITY/throttle): task trả về hàng chờ, '
+         'KHÔNG trừ lượt thử lại; profile nghỉ tạo mới — gấp đôi mỗi lần bị chặn liên tiếp.'),
+        ('flow_block_cooldown_max_secs',     'Google chặn tài khoản: nghỉ tối đa (giây)', 'int', ''),
+        ('flow_block_task_delay_secs',       'Task bị chặn: hoãn trước khi giao lại (giây)', 'int', ''),
+        ('flow_block_max_releases',          'Task bị chặn: số lần hoãn tối đa', 'int',
+         'Quá số lần này thì báo lỗi task như bình thường.'),
+        ('flow_block_slowdown_factor',       'Sau khi bị chặn: nhân giãn cách gửi', 'float', ''),
+        ('flow_block_slowdown_minutes',      'Sau khi bị chặn: thời gian giãn nhịp (phút)', 'int', ''),
+        ('error_patterns',                   'Mẫu lỗi nhận diện', 'list',
+         'Phân cách bằng dấu phẩy.'),
+        ('download_wait_secs',             'Chờ ban đầu trước khi check render (giây)', 'int', ''),
+        ('reconcile_wait_secs',            'Trần chờ render xong (giây)', 'int',
+         'Hết trần vẫn refresh dù trang còn báo đang render.'),
+        ('reconcile_max_rounds',           'Số vòng reconcile tối đa', 'int', ''),
+        ('reconcile_lookback_secs',        'Cửa sổ media gần đây (giây)', 'int', ''),
+        ('reconcile_retry_lookback_secs',  'Cửa sổ quét khi lô có task chạy lại (giây)', 'int',
+         'Check đầu batch để không tạo trùng task đã render xong.'),
     ]),
     ('Omni', [
         ('omni_max_concurrent',            'Omni: số task video đồng thời', 'int',
@@ -63,30 +109,6 @@ _TABS = [
     ('Gemini', [
         ('max_concurrent_gemini_profiles', 'Số profile Gemini chạy đồng thời', 'int',
          'Chỉ mở khi có việc Gemini đang chờ.'),
-        ('quiet_hours_enabled',            'Bật khung giờ không nhận task', 'bool',
-         'Tự tắt nhận task trong khung giờ bên dưới, hết giờ tự bật lại.'),
-        ('quiet_hours_start',              'Bắt đầu (HH:MM)', 'str', ''),
-        ('quiet_hours_end',                'Kết thúc (HH:MM)', 'str',
-         'Hỗ trợ khung vắt qua nửa đêm, vd 22:00 → 06:00.'),
-        ('bind_tasks_to_project_email',    'Chỉ chạy task theo project + email', 'bool',
-         'Profile VEO chỉ nhận task của project gán đúng email của nó, vào đúng link Flow '
-         'đã gán và dùng lại id ảnh đã lưu làm tham chiếu thay vì upload.'),
-        ('google_login_check_enabled',     'Check đăng nhập Google trước khi vào trang', 'bool',
-         'Tắt = vào thẳng trang nhận task. Bật = tự phát hiện và tự đăng nhập lại nếu bị đăng xuất.'),
-        ('use_cloakbrowser',               'Chạy bằng CloakBrowser (chống "hoạt động bất thường")', 'bool',
-         'Luồng RIÊNG, không dùng undetected_chromedriver. Thư mục profile riêng (<profile>_cloak) — '
-         'lần đầu phải "Mở login browser" đăng nhập lại. Lần đầu tự tải ~550MB. '
-         'Áp dụng khi mở trình duyệt kế tiếp (Stop rồi Start profile).'),
-        ('cloak_geoip',                    'Cloak: geoip', 'bool',
-         'Khớp múi giờ + ngôn ngữ + IP WebRTC theo IP ra của proxy (như launch(geoip=True)).'),
-        ('cloak_rotate_fp_on_block',       'Đổi fingerprint khi bị chặn (Cloak + Chrome)', 'bool',
-         'Khi Google trả lỗi PUBLIC_ERROR_UNUSUAL_ACTIVITY / USER_REQUESTS_THROTTLED: đổi seed '
-         'fingerprint của profile, đóng trình duyệt; lần mở kế tiếp dùng fingerprint mới. '
-         'Cloak: đổi seed fingerprint. Chrome thường: vá phần cứng ảo + nhiễu canvas (UA/WebGL giữ nguyên).'),
-        ('cloak_humanize',                 'Cloak: humanize', 'bool',
-         'Chuột đi đường cong, gõ phím theo nhịp người thật khi thao tác giao diện (như launch(humanize=True)).'),
-    ]),
-    ('Tạo ảnh/video', [
         ('gemini_send_via_rpc',            'Gemini: gửi ẩn qua RPC', 'bool',
          'Không gõ prompt vào ô nhập liệu. Có file đính kèm luôn dùng DOM.'),
     ]),
@@ -113,37 +135,6 @@ _TABS = [
          'rồi theo thứ tự — kém chắc chắn.'),
         ('muse_image_timeout',             'Chờ ảnh tối đa (giây)', 'int', ''),
         ('muse_video_timeout',             'Chờ video tối đa (giây)', 'int', ''),
-    ]),
-    ('Lỗi & phục hồi', [
-        ('error_sleep_secs',                 'Thời gian ngủ khi escalation (giây)', 'int', ''),
-        ('error_wait_secs',                  'Chờ sau lỗi trước khi thử lại (giây)', 'int', ''),
-        ('batch_fail_count_before_sleep',    'Batch lỗi liên tiếp → ngủ', 'int',
-         'Batch có ≥1 task thành công = batch thành công. Thời gian ngủ = "Thời gian ngủ khi escalation".'),
-        ('batch_sleep_wipe_cookies',         'Khi ngủ: xoá toàn bộ cookie/cache', 'bool',
-         'Bật = xoá hết cookie/cache (cả đăng nhập) rồi tự check/đăng nhập lại ở lần chạy sau. '
-         'Tắt = chỉ ngủ, giữ nguyên cookie/cache.'),
-        ('flow_block_cooldown_min_secs',     'Google chặn tài khoản: nghỉ tối thiểu (giây)', 'int',
-         'Khi Flow báo "hoạt động bất thường" (UNUSUAL_ACTIVITY/throttle): task trả về hàng chờ, '
-         'KHÔNG trừ lượt thử lại; profile nghỉ tạo mới — gấp đôi mỗi lần bị chặn liên tiếp.'),
-        ('flow_block_cooldown_max_secs',     'Google chặn tài khoản: nghỉ tối đa (giây)', 'int', ''),
-        ('flow_block_task_delay_secs',       'Task bị chặn: hoãn trước khi giao lại (giây)', 'int', ''),
-        ('flow_block_max_releases',          'Task bị chặn: số lần hoãn tối đa', 'int',
-         'Quá số lần này thì báo lỗi task như bình thường.'),
-        ('flow_block_slowdown_factor',       'Sau khi bị chặn: nhân giãn cách gửi', 'float', ''),
-        ('flow_block_slowdown_minutes',      'Sau khi bị chặn: thời gian giãn nhịp (phút)', 'int', ''),
-        ('error_patterns',                   'Mẫu lỗi nhận diện', 'list',
-         'Phân cách bằng dấu phẩy.'),
-    ]),
-    ('Reconcile', [
-        ('download_wait_secs',             'Chờ ban đầu trước khi check render (giây)', 'int', ''),
-        ('reconcile_wait_secs',            'Trần chờ render xong (giây)', 'int',
-         'Hết trần vẫn refresh dù trang còn báo đang render.'),
-        ('reconcile_max_rounds',           'Số vòng reconcile tối đa', 'int', ''),
-        ('reconcile_lookback_secs',        'Cửa sổ media gần đây (giây)', 'int', ''),
-        ('reconcile_retry_lookback_secs',  'Cửa sổ quét khi lô có task chạy lại (giây)', 'int',
-         'Check đầu batch để không tạo trùng task đã render xong.'),
-    ]),
-    ('Debug', [
     ]),
 ]
 
@@ -234,13 +225,12 @@ class SettingsPage(QWidget):
         self._tabs.setStyleSheet(_TAB_QSS)
         for title, fields in _TABS:
             self._tabs.addTab(self._make_fields_tab(fields), title)
-        self._tabs.addTab(self._make_status_tab(), 'Trạng thái')
         self._tabs.addTab(self._make_identity_tab(), 'Danh tính máy')
         self._tabs.currentChanged.connect(self._on_tab_changed)
         outer.addWidget(self._tabs, 1)
 
         # Thanh Lưu/Đặt lại dùng chung cho các tab cài đặt (ẩn ở tab
-        # Trạng thái / Danh tính — 2 tab đó không có gì để lưu ở đây).
+        # Danh tính — không có gì để lưu ở đây).
         self._save_bar = QWidget()
         bar = QHBoxLayout(self._save_bar)
         bar.setContentsMargins(0, 10, 0, 0)
@@ -359,36 +349,6 @@ class SettingsPage(QWidget):
         api('POST', '/api/selenium/local_settings/reset',
             on_done=self._on_save_done, on_err=lambda _m: self._set_status('Lỗi khi reset — server offline?', ok=False))
 
-    # ── Tab trạng thái (read-only) ───────────────────────────────────────────
-
-    def _make_status_tab(self) -> QScrollArea:
-        inner = QWidget(); inner.setStyleSheet('background:transparent;')
-        col = QVBoxLayout(inner)
-        col.setContentsMargins(0, 12, 4, 0)
-        col.setSpacing(16)
-        for key, title in (('dispatcher', '⚙️  Dispatcher / Auto-scale'),
-                           ('pending',    '📊  Backlog hiện tại (pending_by_mode)')):
-            card, lay = _card(title)
-            grid = QGridLayout()
-            grid.setHorizontalSpacing(20)
-            grid.setVerticalSpacing(6)
-            grid.setColumnStretch(1, 1)
-            lay.addLayout(grid)
-            self._grids[key] = grid
-            col.addWidget(card)
-        col.addStretch()
-        return _scroll(inner)
-
-    def _fill(self, key: str, rows: list):
-        grid = self._grids[key]
-        while grid.count():
-            item = grid.takeAt(0)
-            w = item.widget()
-            if w:
-                w.deleteLater()
-        for i, (k, v) in enumerate(rows):
-            _kv_row(grid, i, k, v)
-
     # ── Tab danh tính (2026-07-18) ───────────────────────────────────────────
     # UUID cố định của installation này — backend dùng để scope profile/
     # extension. Client ID chỉ đọc; Tên gợi nhớ tuỳ chỉnh để phân biệt máy.
@@ -471,25 +431,3 @@ class SettingsPage(QWidget):
 
         self._apply_settings(data.get('local_settings') or {})
 
-        desired = data.get('desired_veo3') or []
-        active  = data.get('active_workers') or []
-        self._fill('dispatcher', [
-            ('Master switch', 'BẬT — đang nhận task' if data.get('master_switch_enabled')
-                               else 'TẮT — đã tạm dừng'),
-            ('Khung giờ không nhận task', 'ĐANG trong khung giờ' if data.get('quiet_hours_active')
-                               else 'Ngoài khung giờ (hoặc đang tắt)'),
-            ('Profile đang chạy thật (active_workers)', ', '.join(map(str, active)) or '(không có)'),
-            ('Profile "muốn chạy" (desired_veo3)',      ', '.join(map(str, desired)) or '(không có)'),
-        ])
-
-        p    = data.get('pending') or {}
-        page = data.get('pending_age_secs')
-        fail = data.get('pending_fail_streak')
-        self._fill('pending', [
-            ('imageTotal', p.get('imageTotal', 0)),
-            ('videoTotal', p.get('videoTotal', 0)),
-            ('total',      p.get('total', 0)),
-            ('byMode',     p.get('byMode') or {}),
-            ('Tuổi cache', f'{page}s trước' if page is not None else 'chưa fetch được lần nào'),
-            ('Số lần fetch lỗi liên tiếp', fail if fail is not None else 0),
-        ])

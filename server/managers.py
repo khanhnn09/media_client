@@ -474,7 +474,19 @@ def _merge_local_flags(row):
         # (2026-10-12) Extension chọn riêng cho profile — CHỈ lưu cục bộ (CSV id; '' = không nạp
         # gì; None = chưa từng chọn → hành vi cũ). Xem `em.paths_for()`.
         row['extension_ids'] = loc.get('extension_ids')
+        # (2026-10-17) Chạy task theo project + email — cờ RIÊNG từng profile VEO, chỉ lưu cục bộ.
+        row['bind_project_email'] = int(loc.get('bind_project_email') or 0)
     return row
+
+
+def bind_enabled_for(profile) -> bool:
+    """Profile VEO (api/dom) này có bật 'chỉ chạy task theo project + email' không."""
+    if not profile or profile.get('worker_mode') not in ('api', 'dom'):
+        return False
+    try:
+        return bool(int(profile.get('bind_project_email') or 0))
+    except (TypeError, ValueError):
+        return False
 
 
 class _ProfileManager:
@@ -493,7 +505,7 @@ class _ProfileManager:
                gemini_max_concurrent_tabs=1, gemini_tab_switch_interval=0.5,
                chatgpt_attach_timeout=60, chatgpt_response_timeout=300,
                proxy_server='', run_hours='', totp_secret='', omni_enabled=0,
-               veo_enabled=1, fp_aspects='', extension_ids=None) -> int:
+               veo_enabled=1, fp_aspects='', extension_ids=None, bind_project_email=0) -> int:
         profile_dir = str(Path(PROFILES_DIR) / name)
         os.makedirs(profile_dir, exist_ok=True)  # cục bộ — user-data-dir chỉ có ý nghĩa trên máy này
         # (2026-08-07) 'gemini_video' — BUG THẬT đã sót ở đây từ lúc thêm loại
@@ -536,6 +548,8 @@ class _ProfileManager:
             _set_local_flag(new_id, 'veo_enabled',
                             0 if (not veo_enabled and omni_enabled and worker_mode in ('api', 'dom')) else 1)
             _set_local_flag(new_id, 'fp_aspects', fp_aspects or '')
+            _set_local_flag(new_id, 'bind_project_email',
+                            1 if bind_project_email and worker_mode in ('api', 'dom') else 0)
             if extension_ids is not None:
                 _set_local_flag(new_id, 'extension_ids', str(extension_ids))
         return new_id
@@ -559,6 +573,8 @@ class _ProfileManager:
             _set_local_flag(profile_id, 'veo_enabled', sets['veo_enabled'])
         if 'extension_ids' in fields and fields['extension_ids'] is not None:   # chỉ cục bộ
             _set_local_flag(profile_id, 'extension_ids', str(fields['extension_ids']))
+        if 'bind_project_email' in fields:   # chỉ cục bộ
+            _set_local_flag(profile_id, 'bind_project_email', 1 if fields['bind_project_email'] else 0)
         if 'fp_aspects' in fields:        # chỉ cục bộ, không gửi backend
             _set_local_flag(profile_id, 'fp_aspects', fields['fp_aspects'] or '')
         if not sets:
