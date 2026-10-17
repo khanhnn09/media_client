@@ -80,7 +80,7 @@ def _clamp(settings: dict) -> dict:
             s['muse_batch_size'] = max(1, min(int(s['muse_batch_size']), 5))
         except (TypeError, ValueError):
             s['muse_batch_size'] = _DEFAULT_SERVER_SETTINGS['muse_batch_size']
-    for k in ('muse_task_gap_secs', 'muse_batch_gap_secs', 'muse_image_timeout', 'muse_video_timeout'):
+    for k in ('muse_late_grace_secs', 'muse_task_gap_secs', 'muse_batch_gap_secs', 'muse_image_timeout', 'muse_video_timeout'):
         if k in s:
             try:
                 s[k] = max(0, int(float(s[k])))

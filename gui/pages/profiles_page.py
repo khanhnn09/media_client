@@ -523,6 +523,10 @@ class ProfilesPage(QWidget):
         act_edit.triggered.connect(lambda _, pp=p: self._edit(pp))
         menu.addAction(act_edit)
 
+        act_clone = QAction('📋  Sao chép profile (chỉ thông số cài đặt)', menu)
+        act_clone.triggered.connect(lambda _, pp=p: self._clone(pp))
+        menu.addAction(act_clone)
+
         # Xoá thời gian ngủ (2026-09-23) — chỉ bấm được khi profile đang ngủ.
         act_wake = QAction('⏰  Xóa thời gian ngủ (đánh thức ngay)', menu)
         is_sleeping = p.get('status') == 'sleeping' or bool(p.get('sleepUntil'))
@@ -568,6 +572,14 @@ class ProfilesPage(QWidget):
 
     def _add(self):
         dlg = ProfileDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted: return
+        api('POST', '/api/selenium/profiles', dlg.get_data(),
+            on_done=lambda r: self._chk(r) or self.refresh())
+
+    def _clone(self, p: dict):
+        """Tạo profile mới từ profile cũ — chỉ copy thông số cài đặt (loại, mode, giờ chạy,
+        timeout, extension...); tên/email/mật khẩu/2FA/proxy/project/ghi chú để trống nhập mới."""
+        dlg = ProfileDialog(self, p, clone=True)
         if dlg.exec() != QDialog.DialogCode.Accepted: return
         api('POST', '/api/selenium/profiles', dlg.get_data(),
             on_done=lambda r: self._chk(r) or self.refresh())

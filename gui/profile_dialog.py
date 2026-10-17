@@ -15,10 +15,20 @@ from .api_client import api_sync
 
 
 class ProfileDialog(QDialog):
-    def __init__(self, parent=None, profile: dict | None = None):
+    # Các trường "danh tính" KHÔNG sao chép khi nhân bản profile (chỉ copy thông số cài đặt).
+    _CLONE_CLEAR = ('profile_name', 'display_name', 'account_email', 'account_password',
+                    'account_totp_secret', 'project_url', 'proxy_server', 'notes')
+
+    def __init__(self, parent=None, profile: dict | None = None, clone: bool = False):
         super().__init__(parent)
+        self._clone = bool(clone and profile)
+        if self._clone:
+            profile = {k: v for k, v in profile.items() if k != 'id'}
+            for k in self._CLONE_CLEAR:
+                profile[k] = ''
         self._p = profile
-        self.setWindowTitle('Thêm profile' if not profile else f'Sửa — {profile["profile_name"]}')
+        self.setWindowTitle('Thêm profile' if not profile else
+                            'Sao chép profile' if self._clone else f'Sửa — {profile["profile_name"]}')
         self.setFixedWidth(480)
         self.setModal(True)
         self._build()
@@ -31,7 +41,7 @@ class ProfileDialog(QDialog):
         # Title
         title_row = QHBoxLayout()
         title_row.setSpacing(10)
-        icon_badge = QLabel('➕' if not self._p else '✏')
+        icon_badge = QLabel('➕' if not self._p else '📋' if self._clone else '✏')
         icon_badge.setFixedSize(34, 34)
         icon_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         icon_badge.setStyleSheet(f"""
@@ -41,8 +51,8 @@ class ProfileDialog(QDialog):
         """)
         title_col = QVBoxLayout()
         title_col.setSpacing(2)
-        t = lbl('Thêm profile' if not self._p else 'Sửa profile', 'title')
-        sub = lbl('Mỗi profile là một tài khoản Google riêng biệt' if not self._p else
+        t = lbl('Thêm profile' if not self._p else 'Sao chép profile' if self._clone else 'Sửa profile', 'title')
+        sub = lbl('Mỗi profile là một tài khoản Google riêng biệt' if not self._p or self._clone else
                   f'ID: {self._p["id"]}  •  Thư mục: {self._p.get("profile_dir","?")}', 'subtitle')
         title_col.addWidget(t)
         title_col.addWidget(sub)
@@ -112,7 +122,7 @@ class ProfileDialog(QDialog):
 
         if self._p:
             self._name.setText(self._p['profile_name'])
-            self._name.setEnabled(False)
+            self._name.setEnabled(self._clone)
             self._display.setText(self._p.get('display_name',''))
             self._email.setText(self._p.get('account_email',''))
             self._password.setText(self._p.get('account_password',''))

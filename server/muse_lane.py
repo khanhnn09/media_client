@@ -222,6 +222,7 @@ _FETCH_JS = """new Promise(function(res){
 
 class MuseLane:
     def __init__(self, worker):
+        self._late: dict = {}        # task hết giờ chờ nhưng CHƯA báo lỗi — còn chờ nền (tránh giao trùng sang tài khoản khác)
         self._recover_due = True      # quét media đã tạo mà chưa nhận: lúc khởi động + mỗi lần nạp lại chat
         self.w = worker
         self.profile_id = worker.profile_id
@@ -283,8 +284,22 @@ class MuseLane:
         self._thread = threading.Thread(target=self._loop, daemon=True,
                                         name=f'muse-{self.profile_id}')
         self._thread.start()
+        # Heartbeat giữ ấm TÁCH RIÊNG vòng chính: gửi task/chờ kết quả/tải file có thể chặn >30s,
+        # khi đó máy bị coi offline → reaper thu hồi NGAY task đang tạo và giao cho tài khoản khác
+        # (chạy trùng, có task ra 3 video). Luồng này heartbeat đều mỗi POLL_INTERVAL bất kể.
+        self._ka_thread = threading.Thread(target=self._keepalive_loop, daemon=True,
+                                           name=f'muse-ka-{self.profile_id}')
+        self._ka_thread.start()
         self._log('ok', f'Tab Muse sẵn sàng — nhận task ẢNH + VIDEO ({self.machine_code})')
         return True
+
+    def _keepalive_loop(self):
+        while not self._halt.wait(POLL_INTERVAL):
+            try:
+                self._heartbeat(running=(getattr(self, 'inflight', 0) or 0) + len(self._late),
+                                keepalive_only=True)
+            except Exception:
+                pass
 
     def stop(self):
         self._halt.set()
@@ -407,6 +422,35 @@ class MuseLane:
             self._log('warn', f'Báo draft về server lỗi: {e}')
         self._sent_drop(tid)
 
+    def _poll_late(self):
+        """Task hết giờ chờ trong lô nhưng còn trong `_late`: nhận kết quả nếu Muse tạo xong muộn,
+        ghi nhận từ chối, hoặc báo lỗi khi quá hạn ân hạn."""
+        if not self._late:
+            return
+        tasks = [t for t, _ in self._late.values()]
+        media = [m for m in self._media() if m['src'] not in self._seen]
+        got = assign_media(tasks, media, order_fallback=False) if media else {}
+        for tid, m in got.items():
+            task = self._late.pop(tid)[0]
+            try:
+                self._finish(task, m)
+                self._seen.add(m['src'])
+                self._sent_drop(tid)
+            except Exception as e:
+                self._log('error', f'✘ Task #{tid}: {e}')
+                self._report_error(tid, str(e))
+        rest = {tid: v for tid, v in self._late.items()}
+        for tid, reply in self._refusals(list(rest)).items():
+            if tid in self._late:
+                self._reject(self._late.pop(tid)[0], reply)
+        now = time.time()
+        for tid, (t, dl) in list(self._late.items()):
+            if now >= dl:
+                self._late.pop(tid, None)
+                msg = 'Hết thời gian chờ kết quả từ Muse (kể cả chờ nền)'
+                self._log('error', f'✘ Task #{tid}: {msg}')
+                self._report_error(tid, msg)
+
     def _report_error(self, task_id, message: str):
         self.error_count += 1
         try:
@@ -415,7 +459,10 @@ class MuseLane:
             pass
         try:
             self.w._req('POST', f'{FLOW_SERVER}/api/media/task/error',
-                        body={'taskId': task_id, 'machineCode': self.machine_code,
+                        # toDraft: MỌI lỗi của làn Muse đá task về DRAFT (kèm lý do) thay vì tự quay lại
+                        # hàng chờ — retry tự động làm Muse tạo lại (tốn quota, chạy trùng); người dùng
+                        # xem lý do ở lịch sử lỗi rồi tự bấm chạy lại khi muốn.
+                        body={'taskId': task_id, 'machineCode': self.machine_code, 'toDraft': True,
                               'errorMessage': f'[Muse] {message}'[:1000]})
         except Exception:
             pass
@@ -441,7 +488,9 @@ class MuseLane:
                         self._recover_existing()
                     except Exception as e:
                         self._log('warn', f'Quét kết quả sót lỗi: {e}')
-                tasks = self._heartbeat()
+                if self._late:
+                    self._poll_late()
+                tasks = self._heartbeat(running=len(self._late))
                 if not tasks:
                     stop.wait(POLL_INTERVAL)
                     continue
@@ -564,7 +613,15 @@ class MuseLane:
             except Exception as e:
                 self._log('error', f'✘ Task #{tid}: {e}')
                 self._report_error(tid, str(e))
+        grace = max(0, int(s.get('muse_late_grace_secs') or 0))
         for tid, t in pending.items():
+            if grace and not self._stopped():
+                # KHÔNG báo lỗi ngay: báo lỗi → server giao lại cho tài khoản khác trong khi Muse vẫn
+                # đang tạo ⇒ chạy trùng. Giữ task ở trạng thái đang xử lý, chờ nền thêm `grace` giây.
+                self._late[tid] = (t, time.time() + grace)
+                self._log('warn', f'⏳ Task #{tid}: chưa có kết quả sau {timeout}s — chờ nền thêm {grace}s '
+                                  f'(chưa báo lỗi để không bị giao trùng)')
+                continue
             msg = f'Hết {timeout}s chưa có kết quả từ Muse'
             self._log('error', f'✘ Task #{tid}: {msg}')
             self._report_error(tid, msg)

@@ -378,6 +378,18 @@ BE_INTERCEPTOR_JS = """
             if (window.__beCalls.length > 20) window.__beCalls.shift();
         } catch(e) {}
     }
+    function bodyStr(b){
+        try {
+            if (b == null) return '';
+            if (typeof b === 'string') return b;
+            if (typeof URLSearchParams !== 'undefined' && b instanceof URLSearchParams) return b.toString();
+            if (typeof FormData !== 'undefined' && b instanceof FormData) {
+                var o = []; b.forEach(function(v, k){ o.push(encodeURIComponent(k) + '=' + encodeURIComponent(String(v))); });
+                return o.join('&');
+            }
+            return String(b);
+        } catch(e) { return ''; }
+    }
     var _origOpen = XMLHttpRequest.prototype.open;
     var _origSend = XMLHttpRequest.prototype.send;
     XMLHttpRequest.prototype.open = function(method, url){
@@ -387,7 +399,7 @@ BE_INTERCEPTOR_JS = """
     XMLHttpRequest.prototype.send = function(body){
         var self = this;
         if (self.__beUrl && String(self.__beUrl).indexOf('batchexecute') !== -1) {
-            self.__beReqBody = body;
+            self.__beReqBody = bodyStr(body);
             self.addEventListener('load', function(){
                 try {
                     push({url: self.__beUrl, reqBody: self.__beReqBody,
@@ -401,11 +413,18 @@ BE_INTERCEPTOR_JS = """
     window.fetch = function(input, init){
         var url = typeof input === 'string' ? input : (input && input.url) || String(input);
         if (String(url).indexOf('batchexecute') === -1) return _prevFetch.apply(this, arguments);
+        // Body có thể nằm ở `init.body` HOẶC trong đối tượng Request (input.clone().text()).
+        var reqBodyP;
+        if (init && init.body != null) reqBodyP = Promise.resolve(bodyStr(init.body));
+        else if (input && typeof input !== 'string' && input.clone) reqBodyP = input.clone().text().catch(function(){ return ''; });
+        else reqBodyP = Promise.resolve('');
         return _prevFetch.apply(this, arguments).then(function(resp){
             try {
-                resp.clone().text().then(function(t){
-                    push({url: url, reqBody: init && init.body, respBody: t, status: resp.status});
-                }).catch(function(){});
+                reqBodyP.then(function(rb){
+                    resp.clone().text().then(function(t){
+                        push({url: url, reqBody: rb, respBody: t, status: resp.status});
+                    }).catch(function(){});
+                });
             } catch(e) {}
             return resp;
         });
@@ -2754,28 +2773,51 @@ class SeleniumFlowWorker:
             self._log('warn', f'batchexecute: refresh trang lỗi: {e}')
             return None
 
-        sample = None
-        deadline = time.time() + 15
-        while time.time() < deadline:
-            sample = self._js(
-                'return (window.__beCalls && window.__beCalls.length) ? window.__beCalls[0] : null;')
-            if sample:
-                break
-            self._sleep(1)
-        if not sample:
-            self._log('warn', 'batchexecute: reload xong nhưng không bắt được lệnh nào sau 15s')
+        def _extract(sample):
+            url = (sample or {}).get('url') or ''
+            req_body = (sample or {}).get('reqBody')
+            if not isinstance(req_body, str):
+                req_body = ''
+            m_bl  = re.search(r'[?&]bl=([^&]+)', url)
+            m_sid = re.search(r'[?&]f\.sid=([^&]+)', url)
+            m_at  = re.search(r'(?:^|&)at=([^&]+)', req_body)
+            if m_bl and m_sid and m_at:
+                return {'bl': unquote(m_bl.group(1)), 'sid': unquote(m_sid.group(1)),
+                        'at': unquote(m_at.group(1))}
             return None
 
-        url = sample.get('url') or ''
-        req_body = sample.get('reqBody') or ''
-        m_bl  = re.search(r'[?&]bl=([^&]+)', url)
-        m_sid = re.search(r'[?&]f\.sid=([^&]+)', url)
-        m_at  = re.search(r'(?:^|&)at=([^&]+)', req_body)
-        if not (m_bl and m_sid and m_at):
-            self._log('warn', 'batchexecute: không trích được bl/f.sid/at từ lệnh đã bắt')
-            return None
-        return {'bl': unquote(m_bl.group(1)), 'sid': unquote(m_sid.group(1)),
-                'at': unquote(m_at.group(1))}
+        calls = []
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            calls = self._js('return window.__beCalls || [];') or []
+            # Lệnh đầu tiên chưa chắc có đủ token (vd lệnh log) — thử MỌI lệnh đã bắt.
+            for c in calls:
+                got = _extract(c)
+                if got:
+                    return got
+            self._sleep(1)
+
+        # Dự phòng: token nằm sẵn trong biến toàn cục của trang (như Gemini: WIZ_global_data).
+        try:
+            wiz = self._js(
+                "var w = window.WIZ_global_data || {};"
+                "return {at: w.SNlM0e || '', bl: w.cfb2h || '', sid: w.FdrFJe || ''};") or {}
+            if wiz.get('at') and wiz.get('bl') and wiz.get('sid'):
+                self._log('info', 'batchexecute: lấy token từ WIZ_global_data (không cần lệnh trang tự bắn)')
+                return {'bl': wiz['bl'], 'sid': wiz['sid'], 'at': wiz['at']}
+        except Exception:
+            pass
+
+        if not calls:
+            self._log('warn', 'batchexecute: reload xong nhưng không bắt được lệnh nào sau 15s')
+        else:
+            c = calls[0] or {}
+            rb = c.get('reqBody')
+            self._log('warn', f'batchexecute: bắt được {len(calls)} lệnh nhưng không trích được bl/f.sid/at — '
+                              f'url={str(c.get("url"))[:160]!r} status={c.get("status")} '
+                              f'reqBody({type(rb).__name__},{len(rb) if isinstance(rb, str) else "-"})='
+                              f'{str(rb)[:100]!r} URL={self._js("return location.href;")!r}')
+        return None
 
     def _batchexecute_call(self, rpc_id: str, args: list, session: dict,
                             timeout: int = 20) -> str | None:

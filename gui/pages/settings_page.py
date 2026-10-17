@@ -94,6 +94,8 @@ _TABS = [
         ('muse_batch_size',                'Số task gửi đồng thời / lô', 'int',
          'Mỗi lô gửi bấy nhiêu yêu cầu liên tiếp vào chat Muse rồi chờ đủ kết quả (1-5). '
          'Lô sau chỉ bắt đầu khi lô trước xong VÀ đủ khoảng cách bên dưới.'),
+        ('muse_late_grace_secs',           'Chờ nền thêm khi hết giờ (giây)', 'int',
+         'Hết giờ trong lô mà chưa có kết quả: chưa báo lỗi, chờ nền thêm bấy nhiêu giây (tránh task bị giao trùng cho tài khoản Muse khác). 0 = báo lỗi ngay.'),
         ('muse_task_gap_secs',             'Khoảng cách giữa các task trong lô (giây)', 'int',
          'Nghỉ bấy nhiêu giây giữa 2 lần gửi task liên tiếp trong cùng 1 lô (0 = gửi liền).'),
         ('muse_batch_gap_secs',            'Khoảng cách giữa 2 lô (giây)', 'int',
