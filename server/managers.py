@@ -581,6 +581,15 @@ class _ProfileManager:
             return
         _api('PATCH', f'/api/worker_profiles/{profile_id}', body=sets)
 
+    def get_flow_credits(self) -> dict:
+        """(2026-10-17) {email: {credits, tier, ageSecs}} — credit Flow lưu theo email."""
+        r = _api('GET', '/api/worker_profiles/credits', quiet=True)
+        return (r or {}).get('credits') or {}
+
+    def put_flow_credit(self, email: str, credits: int, tier: str = ''):
+        _api('PUT', '/api/worker_profiles/credits', quiet=True,
+             body={'email': (email or '').strip().lower(), 'credits': int(credits), 'tier': tier or ''})
+
     def get_shared_project_url(self, account_email: str) -> str:
         """(2026-09-11) "url ghi nhớ project flow lưu theo email, dùng chung
         nhiều PC" — tra `GET /api/worker_profiles/project_url_by_email` (bảng

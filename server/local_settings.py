@@ -69,6 +69,13 @@ def _clamp(settings: dict) -> dict:
                 s[k] = _DEFAULT_SERVER_SETTINGS.get(k, 1)
 
 
+    for k in ('flow_credit_per_video', 'flow_credit_max_age_secs'):
+        if k in s:
+            try:
+                s[k] = max(0, int(float(s[k])))
+            except (TypeError, ValueError):
+                s[k] = _DEFAULT_SERVER_SETTINGS[k]
+
     if 'omni_mode' in s:
         s['omni_mode'] = 'dom' if str(s['omni_mode']).strip().lower() == 'dom' else 'api'
     if 'omni_resolution' in s:

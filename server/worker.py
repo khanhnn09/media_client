@@ -479,6 +479,21 @@ class ModelSelectionFailed(RuntimeError):
 # KHÔNG cần đổi code Python.
 
 
+def _refresh_credit_after(fn):
+    """(2026-10-17) Mỗi lần vào/vào lại project Flow thì cập nhật credit hiện có."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(self, *a, **k):
+        r = fn(self, *a, **k)
+        try:
+            self._refresh_flow_credit()
+        except Exception:
+            pass
+        return r
+    return wrapper
+
+
 class SeleniumFlowWorker:
     """
     Mỗi worker = một Chrome instance chạy nền:
@@ -1156,6 +1171,58 @@ class SeleniumFlowWorker:
     _FLOW_PROJECT_BASE = 'https://flow.google.com/project'
     _FLOW_UUID_RE = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
 
+    # ── (2026-10-17) Credit Flow theo email ──────────────────────────────────
+    # Đọc RPC `nzlxg` (GetCredits, chỉ đọc) → lưu backend theo email. Dispatcher dùng
+    # bản ghi còn mới (< flow_credit_max_age_secs) để quyết định có mở profile không.
+
+    def _credit_needed(self) -> int:
+        try:
+            return int(get_local_settings().get('flow_credit_per_video', 20) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _refresh_flow_credit(self, force: bool = False):
+        if getattr(self, 'worker_mode', '') not in ('api', 'dom'):
+            return
+        email = (self.profile.get('account_email') or '').strip().lower()
+        if not email or not self.driver:
+            return
+        now = time.time()
+        if not force and now - getattr(self, '_flow_credit_at', 0) < 60:
+            return
+        self._flow_credit_at = now
+        try:
+            session = self._be_session()
+            if not session:
+                return
+            raw = self._batchexecute_call('nzlxg', [], session, timeout=20)
+            payload = self._batchexecute_parse(raw, 'nzlxg') if raw else None
+            credits = int(payload[0])
+        except Exception as e:
+            self._log('warn', f'Không đọc được credit Flow: {e}')
+            return
+        tier = flow_models.paygate_from_credits(payload)
+        self._flow_credit = credits
+        self._flow_credit_ok_at = now
+        pm.put_flow_credit(email, credits, tier)
+        need = self._credit_needed()
+        self._log('info', f'💳 Credit Flow {email}: {credits}'
+                          + (f' (~{credits // need} video)' if need else ''))
+
+    def _credit_low(self) -> bool:
+        """Credit đọc gần đây thấp hơn mức cần cho 1 video → không nhận task video."""
+        need = self._credit_needed()
+        c = getattr(self, '_flow_credit', None)
+        if not need or c is None or (self.profile.get('task_mode') == 'image_only'):
+            return False
+        try:
+            max_age = int(get_local_settings().get('flow_credit_max_age_secs', 7200) or 7200)
+        except (TypeError, ValueError):
+            max_age = 7200
+        if time.time() - getattr(self, '_flow_credit_ok_at', 0) > max_age:
+            return False
+        return c < need
+
     def _bind_mode_enabled(self) -> bool:
         """Cài đặt "chỉ chạy task theo project + email" đang bật VÀ đây là profile
         VEO (api/dom) — Gemini/ChatGPT không dùng project Flow nên không áp dụng.
@@ -1549,6 +1616,7 @@ class SeleniumFlowWorker:
             self._log('warn', 'Không tìm thấy nút "New project" trên trang chung')
         return False
 
+    @_refresh_credit_after
     def _ensure_flow_page(self):
         """Navigate về Flow project nếu chưa ở đó. Nếu vẫn rơi vào trang chung (không
         có /project/) — kể cả sau khi navigate, hoặc đã ở labs.google từ trước nhưng
@@ -2252,6 +2320,7 @@ class SeleniumFlowWorker:
         # đã verify DOM thật 2026-08-08, xem `_GOOGLE_SIGNIN_STATE_JS`).
         return self._google_signin_flow(target_url)
 
+    @_refresh_credit_after
     def _ensure_flow_project(self):
         """Navigate đến project page (có CE input).
         project_url trong profile phải là dạng /project/{uuid}."""
@@ -9160,6 +9229,22 @@ class SeleniumFlowWorker:
                     self._log('info', '▶ Hết nghỉ vì bị chặn — nhận task lại (giãn nhịp gửi thêm một thời gian)')
             if blocked_left:
                 outside_hours = True
+            # (2026-10-17) Hết credit (bản đọc còn mới) → chỉ giữ last_seen; stale quá
+            # 2h thì đọc lại ngay (luồng chính, không phải keepalive thread).
+            if not keepalive_only and self.worker_mode in ('api', 'dom'):
+                try:
+                    max_age = int(get_local_settings().get('flow_credit_max_age_secs', 7200) or 7200)
+                    if time.time() - getattr(self, '_flow_credit_ok_at', 0) > max_age:
+                        self._refresh_flow_credit(force=True)
+                except Exception:
+                    pass
+                low = self._credit_low()
+                if low != getattr(self, '_credit_hb_paused', False):
+                    self._credit_hb_paused = low
+                    self._log('info', f'⏸ Credit Flow {self._flow_credit} < {self._credit_needed()}'
+                                      ' — không nhận task video' if low else '▶ Đủ credit — nhận task lại')
+                if low:
+                    outside_hours = True
             if keepalive_only or outside_hours:
                 body['keepaliveOnly'] = True
             # (2026-09-29) Nhận việc upscale 1080p video đã render trong Flow

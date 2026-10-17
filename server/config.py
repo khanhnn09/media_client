@@ -144,6 +144,11 @@ _DEFAULT_SERVER_SETTINGS = {
     # thành công nhưng chưa thấy kết quả thì KHÔNG chuyển DOM (API có thể vẫn
     # đang render — chạy DOM sẽ tạo trùng video).
     'api_fallback_to_dom': 0,
+    # (2026-10-17) Credit Flow: mỗi video tốn ~bao nhiêu credit (hạng Ultra 10, còn lại 20) và
+    # bản ghi credit theo email còn tin được trong bao lâu. Credit dưới ngưỡng + bản ghi còn mới
+    # → không mở profile / không nhận task video.
+    'flow_credit_per_video': 20,
+    'flow_credit_max_age_secs': 7200,
     'api_fake_typing': 0,   # API mode: gõ prompt vào ô nhập như người thật (không bấm gửi), post API xong thì xoá
     # (2026-09-27) Làn Omni (Google Vids) chạy kèm profile VEO bật "Kết hợp chạy
     # Omni" — số task video làn Omni nhận/bắn đồng thời (1-5). Xem server/omni_lane.py.

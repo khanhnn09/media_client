@@ -325,6 +325,46 @@ _NO_PROJECT_WORKER_MODES = ('gemini_video', 'gemini_image', 'muse')
 _run_hours_blocked_pids: set = set()
 
 
+_credits_cache: dict = {'at': 0.0, 'data': {}}
+_credit_blocked_pids: set = set()
+
+
+def _credit_gate(profile: dict) -> bool:
+    """(2026-10-17) False nếu credit Flow đã lưu theo email (còn mới, < flow_credit_max_age_secs)
+    thấp hơn mức cần cho 1 video → không mở profile. Chưa có bản ghi / bản ghi cũ hơn
+    ngưỡng → True (mở profile để nó đọc lại credit lúc vào project)."""
+    if profile.get('worker_mode') not in ('api', 'dom') or profile.get('task_mode') == 'image_only':
+        return True
+    st = get_local_settings()
+    need = int(st.get('flow_credit_per_video', 20) or 0)
+    email = (profile.get('account_email') or '').strip().lower()
+    if not need or not email:
+        return True
+    now = time.time()
+    if now - _credits_cache['at'] > 30:
+        _credits_cache['at'] = now
+        try:
+            _credits_cache['data'] = pm.get_flow_credits() or _credits_cache['data']
+        except Exception:
+            pass
+    rec = _credits_cache['data'].get(email)
+    pid = profile['id']
+    max_age = int(st.get('flow_credit_max_age_secs', 7200) or 7200)
+    if rec and rec.get('ageSecs', 10**9) <= max_age and int(rec.get('credits', 0)) < need:
+        if pid not in _credit_blocked_pids:
+            _credit_blocked_pids.add(pid)
+            log.info(f'[credit] Profile {pid} ({email}): credit {rec["credits"]} < {need} '
+                     f'(cập nhật {rec["ageSecs"]}s trước) — không mở profile')
+        _desired_veo3.discard(pid)
+        if pid in _workers:
+            w, _t = _workers[pid]
+            if not _worker_busy(w):
+                _stop_worker(pid)
+        return False
+    _credit_blocked_pids.discard(pid)
+    return True
+
+
 def _run_hours_gate(profile: dict) -> bool:
     """True nếu profile được chạy lúc này. Ngoài khung giờ → bỏ khỏi `_desired_veo3`
     và đóng ngay nếu đang chạy mà không có task dở (task dở chạy xong mới đóng —
@@ -408,6 +448,8 @@ def _auto_scale_veo3_tick():
                 and not profile.get('project_url') and not bind_enabled_for(profile)):
             continue
         if not _run_hours_gate(profile):
+            continue
+        if not _credit_gate(profile):
             continue
 
         if _profile_veo3_eligible(profile, pending):
