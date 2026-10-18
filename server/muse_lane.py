@@ -74,7 +74,11 @@ def build_prompt(task: dict, settings: dict | None = None, with_token: bool = Tr
     # `TASK_<id>:` như VEO — mã để gán kết quả về đúng task (Muse đặt tên file theo mã đầu prompt).
     if with_token and s.get('muse_name_token', 1) and not _TASK_LEAD.match(body):
         body = f'{task_token(task)}: {body}'
-    return f'{prefix}{body}{suffix}'
+    note = ''
+    if with_token and s.get('muse_name_token', 1):
+        # Câu cuối: Muse báo lại bằng tiếng Anh khi tạo xong → tin nhắn có `TASK_<id>` để gán kết quả.
+        note = f' When it is created successfully, reply in English: "{task_token(task)} created successfully."'
+    return f'{prefix}{body}{suffix}{note}'
 
 
 _TASK_LEAD = re.compile(r'^\s*TASK_\d+')
@@ -101,24 +105,62 @@ def lead_slug(task: dict) -> str:
 _WORD = re.compile(r'[a-z0-9]{4,}')
 
 
+def _no_zero(text: str) -> str:
+    """Bỏ số 0 đứng đầu sau dấu gạch: "cue-074" → "cue-74" (Muse có thể đặt tên file không có số 0)."""
+    return re.sub(r'-0+(?=\d)', '-', text)
+
+
 def assign_media(tasks: list, media: list, order_fallback: bool = False) -> dict:
     """Gán media mới (list {kind,label,src}, theo thứ tự xuất hiện) cho task: theo
     `task-<id>` rồi mã đầu prompt gốc trong nhãn; `order_fallback` mới gán theo thứ tự
     (cùng loại ảnh/video) cho task KHÔNG có mã nào. Trả {task_id: media}."""
     out: dict = {}
     left = list(media)
+    leads = [lead_slug(t) for t in tasks if lead_slug(t)]
     for t in tasks:
-        keys = [k for k in (task_slug(t), lead_slug(t)) if k]
+        ls = lead_slug(t)
+        if ls and leads.count(ls) > 1:
+            ls = ''                  # mã đầu prompt trùng giữa 2 task (khác project) → không dùng
+        keys = [k for k in (task_slug(t), ls) if k]
         hit = None
         for k in keys:                       # mã đầu prompt trước, rồi mã m<id>
+            k = _no_zero(k)
             hit = next((m for m in left
                         if re.search(r'(?<![a-z0-9])' + re.escape(k) + r'(?![a-z0-9])',
-                                     (m.get('label') or '').lower().replace('_', '-'))), None)
+                                     _no_zero((m.get('label') or '').lower().replace('_', '-')))), None)
             if hit:
                 break
         if hit:
             out[t['id']] = hit
             left.remove(hit)
+    # Nhãn không có mã (Muse cắt tên file) → dùng tin nhắn liền trước ô media. Chỉ gán khi ctx
+    # chỉ khớp ĐÚNG 1 task cùng loại (tin nhắn nhắc nhiều mã thì bỏ qua, tránh gán nhầm).
+    for m in list(left):
+        ctx = _no_zero((m.get('ctx') or '').lower().replace('_', '-'))
+        if not ctx:
+            continue
+        cands = []
+        for t in tasks:
+            if t['id'] in out or is_video_task(t) != (m.get('kind') == 'video'):
+                continue
+            ks = [task_slug(t)]          # CHỈ TASK_<id>: mã CUE_xx có thể trùng giữa các project
+            if any(re.search(r'(?<![a-z0-9])' + re.escape(k) + r'(?![a-z0-9])', ctx) for k in ks):
+                cands.append(t)
+        if len(cands) == 1:
+            out[cands[0]['id']] = m
+            left.remove(m)
+    # Tin "TASK_<id> created successfully." đứng SAU ô media — chỉ dùng khi chưa gán được bằng nhãn/tin trước
+    # (Muse có lúc ghi nhầm mã trong tin này, nên là tín hiệu yếu nhất).
+    for m in list(left):
+        after = (m.get('after') or '').lower().replace('_', '-')
+        mm = re.search(r'(?<![a-z0-9])task-(\d+)(?![a-z0-9])', after)
+        if not mm:
+            continue
+        t = next((x for x in tasks if x['id'] not in out and str(x['id']) == mm.group(1)
+                  and is_video_task(x) == (m.get('kind') == 'video')), None)
+        if t:
+            out[t['id']] = m
+            left.remove(m)
     if order_fallback:
         for t in tasks:
             if t['id'] in out or lead_slug(t):
@@ -190,13 +232,46 @@ _MEDIA_JS = """(function(){
   // Nhãn đổi theo ngôn ngữ giao diện Muse: "Mở video …"/"Open animated video …",
   // "Mở hình ảnh đã tạo …"/"Open generated image …" — nhận cả hai, phân loại theo thẻ con.
   var LAB = /^(Mở |Open |View |Xem )|image|hình ảnh|video/i;
+  // Muse cắt tên file ở ~30 ký tự đầu prompt nên mã TASK_/CUE_ có thể KHÔNG nằm trong nhãn.
+  // Tin nhắn Muse ngay trước ô media ("Video CUE_074 … đã hoàn thành") thì luôn nhắc mã → lấy làm ngữ cảnh.
+  var CODE = /TASK_\\d+/;
+  function ctxOf(el){
+    var log = el.closest('[role=log]');
+    var msg = el;
+    while (log && msg.parentElement && msg.parentElement !== log) msg = msg.parentElement;
+    if (!log || msg.parentElement !== log) return '';
+    var p = msg.previousElementSibling, n = 0;
+    while (p && n < 3) {
+      var t = (p.innerText || '');
+      if (!/^\\s*(Bạn|You)\\s*:/.test(t) && CODE.test(t)) return t.slice(0, 400);
+      p = p.previousElementSibling; n++;
+    }
+    return '';
+  }
+  // Tin báo SAU ô media: "TASK_<id> created successfully." (do câu cuối prompt yêu cầu). Dừng khi gặp tin
+  // người dùng kế tiếp để không lấy nhầm tin của task sau.
+  function afterOf(el){
+    var log = el.closest('[role=log]');
+    var msg = el;
+    while (log && msg.parentElement && msg.parentElement !== log) msg = msg.parentElement;
+    if (!log || msg.parentElement !== log) return '';
+    var p = msg.nextElementSibling, n = 0;
+    while (p && n < 3) {
+      var t = (p.innerText || '');
+      if (/^\\s*(Bạn|You)\\s*:/.test(t) || /^\\s*(Tin nhắn của người dùng)/.test(t)) return '';
+      if (/TASK_\\d+/.test(t)) return t.slice(0, 200);
+      p = p.nextElementSibling; n++;
+    }
+    return '';
+  }
   document.querySelectorAll('[aria-label]').forEach(function(b){
     var l = b.getAttribute('aria-label') || '';
     if (!LAB.test(l)) return;
     var v = b.querySelector('video');
-    if (v) { out.push({kind:'video', label:l, src:v.currentSrc||v.src}); return; }
-    var i = b.querySelector('img[src^="blob:"]');
-    if (i) out.push({kind:'image', label:l, src:i.src});
+    var i = v ? null : b.querySelector('img[src^="blob:"]');
+    if (!v && !i) return;
+    out.push({kind: v ? 'video' : 'image', label:l, src: v ? (v.currentSrc||v.src) : i.src,
+              ctx: ctxOf(b), after: afterOf(b)});
   });
   return out;
 })()"""
