@@ -10,9 +10,11 @@ from PyQt6.QtWidgets import (
     QMenu, QMessageBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
+from ..config import REFRESH_MS
 from ..style import C
 from ..widgets import btn, lbl, Badge, StatCard
 from ..api_client import api
+from PyQt6.QtWidgets import QCheckBox, QMenu, QPushButton, QSpinBox
 from ..profile_dialog import ProfileDialog
 from ..bulk_profile_dialog import BulkProfileDialog
 from server.run_hours import summarize_run_hours
@@ -42,6 +44,7 @@ _TASK_MODE_ENGINE_BADGE = {
 class ProfilesPage(QWidget):
     open_logs = pyqtSignal(int)
     auto_update_toggled = pyqtSignal(bool)   # True = tự cập nhật trạng thái dashboard
+    update_interval_changed = pyqtSignal(int)  # chu kỳ tự cập nhật (giây)
 
     # (2026-08-10, theo yêu cầu user "cột trạng thái / token/ lỗi cũng làm
     # dang badge bỏ cột hôm nay") — gộp 3 cột Trạng thái/Tokens/Lỗi (trước
@@ -52,12 +55,13 @@ class ProfilesPage(QWidget):
     # lỗi trong ngày) — dữ liệu vẫn có, chuyển thành tooltip trên badge Lỗi
     # thay vì chiếm hẳn 1 cột.
     _HDR = ['', 'Tên / Email', 'Mode', 'Trạng thái', 'Task hiện tại', 'Port', 'Auto', 'Hành động']
-    _W   = [10, 0,             165,    190,           200,             70,    82,     90]
+    _W   = [56, 0,             165,    190,           200,             70,    82,     90]
 
     def __init__(self):
         super().__init__()
         self._profiles: list[dict] = []
         self._filter_text = ''
+        self._checked: set[int] = set()     # profile được tick checkbox (giữ qua các lần làm mới)
         self._build()
 
     def _build(self):
@@ -88,7 +92,17 @@ class ProfilesPage(QWidget):
         self._btn_add.setFixedHeight(36)
         self._btn_add_many = btn('+ Thêm nhiều', '', 'Thêm nhiều profile 1 lúc (mỗi dòng 1 profile)')
         self._btn_add_many.setFixedHeight(36)
+        self._spin_interval = QSpinBox()
+        self._spin_interval.setRange(1, 300)
+        self._spin_interval.setValue(REFRESH_MS // 1000)
+        self._spin_interval.setSuffix(' s')
+        self._spin_interval.setFixedHeight(36)
+        self._spin_interval.setFixedWidth(72)
+        self._spin_interval.setToolTip('Chu kỳ tự cập nhật trạng thái dashboard (giây)')
+        self._spin_interval.valueChanged.connect(self.update_interval_changed.emit)
         hdr.addWidget(self._btn_auto)
+        hdr.addSpacing(4)
+        hdr.addWidget(self._spin_interval)
         hdr.addSpacing(8)
         hdr.addWidget(self._btn_refresh)
         hdr.addSpacing(8)
@@ -123,6 +137,19 @@ class ProfilesPage(QWidget):
         self._search.setMaximumWidth(360)
         self._search.textChanged.connect(self._on_search)
         search_row.addWidget(self._search)
+        search_row.addSpacing(16)
+        self._chk_all = QCheckBox('Chọn tất cả')
+        self._chk_all.setTristate(False)
+        self._chk_all.clicked.connect(self._on_check_all)
+        search_row.addWidget(self._chk_all)
+        self._sel_lbl = QLabel('')
+        self._sel_lbl.setStyleSheet(f'color:{C["muted"]}; font-size:12px; background:transparent;')
+        search_row.addWidget(self._sel_lbl)
+        self._btn_bulk = QPushButton('⚙ Hành động cho profile đã chọn ▾')
+        self._btn_bulk.setFixedHeight(36)
+        self._btn_bulk.setEnabled(False)
+        self._btn_bulk.clicked.connect(self._show_bulk_menu)
+        search_row.addWidget(self._btn_bulk)
         search_row.addStretch()
         lay.addLayout(search_row)
         lay.addSpacing(14)
@@ -141,7 +168,7 @@ class ProfilesPage(QWidget):
         self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         for i, w in enumerate(self._W):
             if w: self._table.setColumnWidth(i, w)
-        self._table.setColumnHidden(0, True)
+        self._table.itemChanged.connect(self._on_item_changed)
         lay.addWidget(self._table)
 
         # Empty state (overlay text bên dưới header table, chỉ hiện khi rỗng)
@@ -213,6 +240,14 @@ class ProfilesPage(QWidget):
 
     def _populate(self):
         sel_id = self._sel_id()
+        self._table.blockSignals(True)
+        try:
+            self._populate_rows(sel_id)
+        finally:
+            self._table.blockSignals(False)
+        self._update_bulk_bar()
+
+    def _populate_rows(self, sel_id):
         self._table.setRowCount(0)
         rows = self._filtered()
 
@@ -238,8 +273,11 @@ class ProfilesPage(QWidget):
             login_open = p.get('login_open', False)
             port       = p.get('debug_port', '—')
 
-            # Col 0: hidden id
-            self._table.setItem(row, 0, QTableWidgetItem(str(p['id'])))
+            # Col 0: checkbox chọn profile (chữ = id, dùng cho _sel_id)
+            it0 = QTableWidgetItem(str(p['id']))
+            it0.setFlags((it0.flags() | Qt.ItemFlag.ItemIsUserCheckable) & ~Qt.ItemFlag.ItemIsEditable)
+            it0.setCheckState(Qt.CheckState.Checked if p['id'] in self._checked else Qt.CheckState.Unchecked)
+            self._table.setItem(row, 0, it0)
 
             # Col 1: Avatar + Name + Email
             cell = QWidget()
@@ -591,6 +629,153 @@ class ProfilesPage(QWidget):
         if dlg.exec() != QDialog.DialogCode.Accepted: return
         api('POST', '/api/selenium/profiles', dlg.get_data(),
             on_done=lambda r: self._chk(r) or self.refresh())
+
+    # ── Chọn nhiều profile + hành động hàng loạt ─────────────────────────────
+
+    def _on_item_changed(self, item):
+        if item.column() != 0:
+            return
+        try:
+            pid = int(item.text())
+        except ValueError:
+            return
+        if item.checkState() == Qt.CheckState.Checked:
+            self._checked.add(pid)
+        else:
+            self._checked.discard(pid)
+        self._update_bulk_bar()
+
+    def _visible_ids(self) -> list:
+        return [p['id'] for p in self._filtered()]
+
+    def _on_check_all(self, checked: bool):
+        ids = self._visible_ids()
+        if checked:
+            self._checked |= set(ids)
+        else:
+            self._checked -= set(ids)
+        self._populate()
+
+    def _update_bulk_bar(self):
+        known = {p['id'] for p in self._profiles}
+        self._checked &= known                       # bỏ id profile đã xoá
+        n = len(self._checked)
+        vis = self._visible_ids()
+        self._sel_lbl.setText(f'Đã chọn {n}' if n else '')
+        self._btn_bulk.setEnabled(n > 0)
+        self._chk_all.blockSignals(True)
+        self._chk_all.setChecked(bool(vis) and all(i in self._checked for i in vis))
+        self._chk_all.blockSignals(False)
+
+    def _show_bulk_menu(self):
+        menu = QMenu(self)
+        n = len(self._checked)
+        for label, key in (
+            (f'🌐  Mở login browser ({n})', 'open'),
+            (f'✖  Đóng login browser ({n})', 'close'),
+            (f'😴  Xóa thời gian ngủ ({n})', 'clear_sleep'),
+            (f'🟢  Bật auto ({n})', 'auto_on'),
+            (f'⚪  Tắt auto ({n})', 'auto_off'),
+            (f'🧹  Làm mới profile — xóa sạch ({n})', 'wipe'),
+            (f'🗑  Xóa profile ({n})', 'delete'),
+        ):
+            if key in ('wipe', 'delete'):
+                menu.addSeparator()
+            act = QAction(label, menu)
+            act.triggered.connect(lambda _, k=key: self._bulk(k))
+            menu.addAction(act)
+        menu.exec(self._btn_bulk.mapToGlobal(self._btn_bulk.rect().bottomLeft()))
+
+    def _bulk(self, key: str):
+        by_id = {p['id']: p for p in self._profiles}
+        ids = [i for i in sorted(self._checked) if i in by_id]
+        if not ids:
+            return
+        skipped = []
+
+        def pick(pred, why):
+            ok = []
+            for i in ids:
+                (ok if pred(by_id[i]) else skipped).append(i if pred(by_id[i]) else f'{self._pname(by_id[i])} ({why})')
+            return ok
+
+        if key == 'open':
+            todo = pick(lambda p: not p.get('worker_running') and not p.get('login_open'), 'đang chạy/đã mở')
+            calls = [(i, 'POST', f'/api/selenium/profiles/{i}/open', None) for i in todo]
+        elif key == 'close':
+            todo = pick(lambda p: p.get('login_open'), 'chưa mở login')
+            calls = [(i, 'POST', f'/api/selenium/profiles/{i}/close', None) for i in todo]
+        elif key == 'clear_sleep':
+            todo = pick(lambda p: p.get('status') == 'sleeping', 'không ngủ')
+            calls = [(i, 'POST', f'/api/selenium/profiles/{i}/clear_sleep', None) for i in todo]
+        elif key in ('auto_on', 'auto_off'):
+            todo = list(ids)
+            calls = [(i, 'PATCH', f'/api/selenium/profiles/{i}', {'enabled': 1 if key == 'auto_on' else 0}) for i in todo]
+        elif key == 'wipe':
+            todo = pick(lambda p: not p.get('worker_running') and not p.get('login_open'), 'đang chạy/đang mở login')
+            if todo and QMessageBox.question(
+                self, 'Làm mới profile (xóa sạch — về trắng)',
+                f'Xóa SẠCH TOÀN BỘ dữ liệu Chrome của {len(todo)} profile đã chọn?\n\n'
+                '⚠️ Mất đăng nhập Google, mật khẩu đã lưu, bookmark, cache, cookie, lịch sử, mọi cài đặt Chrome. '
+                'Cần "Mở login browser" đăng nhập lại. KHÔNG THỂ HOÀN TÁC.',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+            ) != QMessageBox.StandardButton.Yes:
+                return
+            calls = [(i, 'POST', f'/api/selenium/profiles/{i}/clear_data', None) for i in todo]
+        elif key == 'delete':
+            todo = list(ids)
+            names = ', '.join(self._pname(by_id[i]) for i in todo[:8]) + (' …' if len(todo) > 8 else '')
+            if QMessageBox.question(
+                self, 'Xóa profile', f'Xóa {len(todo)} profile đã chọn?\n{names}\nDữ liệu Chrome sẽ giữ lại.',
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+            ) != QMessageBox.StandardButton.Yes:
+                return
+            calls = [(i, 'DELETE', f'/api/selenium/profiles/{i}', None) for i in todo]
+        else:
+            return
+
+        if not calls:
+            QMessageBox.information(self, 'Hành động hàng loạt',
+                                    'Không có profile nào phù hợp.\n' + '\n'.join(skipped[:10]))
+            return
+        result = {'ok': 0, 'err': []}
+        titles = {'open': 'Mở login browser', 'close': 'Đóng login browser', 'clear_sleep': 'Xóa thời gian ngủ',
+                  'auto_on': 'Bật auto', 'auto_off': 'Tắt auto', 'wipe': 'Làm mới profile', 'delete': 'Xóa profile'}
+
+        def step(k=0):
+            if k >= len(calls):
+                if key == 'delete':
+                    self._checked -= {c[0] for c in calls}
+                self.refresh()
+                msg = f'{titles[key]}: thành công {result["ok"]}/{len(calls)}.'
+                if skipped:
+                    msg += '\nBỏ qua: ' + ', '.join(skipped[:8]) + (' …' if len(skipped) > 8 else '')
+                if result['err']:
+                    msg += '\nLỗi:\n' + '\n'.join(result['err'][:8])
+                QMessageBox.information(self, 'Hành động hàng loạt', msg)
+                return
+            pid, method, path, body = calls[k]
+            name = self._pname(by_id.get(pid, {'id': pid}))
+
+            def done(r, name=name):
+                if isinstance(r, dict) and r.get('error'):
+                    result['err'].append(f'{name}: {r["error"]}')
+                else:
+                    result['ok'] += 1
+                step(k + 1)
+
+            def fail(m, name=name):
+                result['err'].append(f'{name}: {m}')
+                step(k + 1)
+            if body is None:
+                api(method, path, on_done=done, on_err=fail)
+            else:
+                api(method, path, body, on_done=done, on_err=fail)
+        step()
+
+    @staticmethod
+    def _pname(p: dict) -> str:
+        return p.get('display_name') or p.get('profile_name') or f'#{p.get("id")}'
 
     def _on_auto_toggled(self, on: bool):
         self._btn_auto.setText('⏸ Dừng cập nhật' if on else '▶ Bật cập nhật')

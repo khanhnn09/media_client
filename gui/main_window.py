@@ -83,6 +83,7 @@ class MainWindow(QMainWindow):
 
         self._page_profiles.open_logs.connect(self._goto_logs)
         self._page_profiles.auto_update_toggled.connect(self._set_auto_update)
+        self._page_profiles.update_interval_changed.connect(self._set_update_interval)
 
         # Status bar
         sb = QStatusBar()
@@ -199,6 +200,10 @@ class MainWindow(QMainWindow):
     # thể khiến ngay cả server ĐÃ hồi phục vẫn phải đợi hàng chờ giải phóng).
     _OFFLINE_THRESHOLD_SECS = 25  # không hiện "offline" trừ khi KHÔNG có lần
                                    # poll thành công nào trong khoảng này
+
+    def _set_update_interval(self, secs: int):
+        self._main_timer.setInterval(max(1, int(secs)) * 1000)
+        self.statusBar().showMessage(f'API: {API_BASE}  •  Auto-refresh: {int(secs)}s')
 
     def _set_auto_update(self, on: bool):
         self._auto_update = bool(on)
