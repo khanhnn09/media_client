@@ -69,8 +69,11 @@ def build_prompt(task: dict, settings: dict | None = None, with_token: bool = Tr
     ratio = (task.get('aspect_ratio') or '').strip()
     suffix = ''
     tpl = str(s.get('muse_aspect_suffix') or '')
-    if ratio and tpl:
-        suffix = tpl.replace('{ratio}', ratio)
+    # Hậu tố prompt: {ratio} = tỉ lệ project, {task} = TASK_<id>, {kind} = video|image.
+    # Template có {ratio} mà task không có tỉ lệ thì bỏ cả hậu tố (giữ hành vi cũ).
+    if tpl and (ratio or '{ratio}' not in tpl):
+        suffix = (tpl.replace('{ratio}', ratio).replace('{task}', task_token(task))
+                  .replace('{kind}', 'video' if video else 'image'))
     # `TASK_<id>:` như VEO — mã để gán kết quả về đúng task (Muse đặt tên file theo mã đầu prompt).
     if with_token and s.get('muse_name_token', 1) and not _TASK_LEAD.match(body):
         body = f'{task_token(task)}: {body}'
@@ -145,6 +148,18 @@ def assign_media(tasks: list, media: list, order_fallback: bool = False) -> dict
         if len(cands) == 1:
             out[cands[0]['id']] = m
             left.remove(m)
+    # Tin "TASK_<id> created successfully." đứng SAU ô media (do hậu tố prompt yêu cầu) — chỉ dùng khi chưa gán
+    # được bằng nhãn/tin trước (Muse có lúc ghi nhầm mã trong tin này nên là tín hiệu yếu nhất).
+    for m in list(left):
+        after = (m.get('after') or '').lower().replace('_', '-')
+        mm = re.search(r'(?<![a-z0-9])task-(\d+)(?![a-z0-9])', after)
+        if not mm:
+            continue
+        t = next((x for x in tasks if x['id'] not in out and str(x['id']) == mm.group(1)
+                  and is_video_task(x) == (m.get('kind') == 'video')), None)
+        if t:
+            out[t['id']] = m
+            left.remove(m)
     if order_fallback:
         for t in tasks:
             if t['id'] in out or lead_slug(t):
@@ -180,6 +195,12 @@ def _role(label: str) -> str:
 def _blocks(page_text: str) -> list:
     parts = _MSG_SPLIT.split(page_text or '')
     return [(_role(parts[i]), parts[i + 1].strip()) for i in range(1, len(parts) - 1, 2)]
+
+
+def err_regex(tid) -> 're.Pattern':
+    """`TASK_<id> error creating media; reason: ...` — định dạng lỗi do hậu tố prompt yêu cầu."""
+    return re.compile(r'TASK_%s(?!\d)\s*[:\-]?\s*error\s+creating\s+media\s*[;:,.\-]*\s*(?:reason\s*[:\-]?\s*)?([^\n]*)'
+                      % re.escape(str(tid)), re.I)
 
 
 def find_replies(page_text: str, ids) -> dict:
@@ -224,9 +245,14 @@ def find_refusals(page_text: str, ids) -> dict:
                 last_user = i
         if last_user < 0:
             continue
+        errm = err_regex(tid)
         for role, txt in blocks[last_user + 1:]:
             if role != 'assistant':
                 continue
+            em = errm.search(txt)
+            if em:                                  # đúng format lỗi do hậu tố prompt yêu cầu
+                out[tid] = f'error creating media; reason: {em.group(1).strip() or "(không nêu lý do)"}'
+                break
             for m in _REFUSAL_RE.finditer(txt):
                 seg_end = len(txt)
                 for sep in ('. ', chr(10)):
@@ -274,6 +300,22 @@ _MEDIA_JS = """(function(){
     }
     return '';
   }
+  // Tin báo SAU ô media: "TASK_<id> created successfully." (do hậu tố prompt yêu cầu). Dừng khi gặp tin
+  // người dùng kế tiếp để không lấy nhầm tin của task sau.
+  function afterOf(el){
+    var log = el.closest('[role=log]');
+    var msg = el;
+    while (log && msg.parentElement && msg.parentElement !== log) msg = msg.parentElement;
+    if (!log || msg.parentElement !== log) return '';
+    var p = msg.nextElementSibling, n = 0;
+    while (p && n < 3) {
+      var t = (p.innerText || '');
+      if (/^\\s*(Bạn|You|Tin nhắn của người dùng|User message)\\s*:/i.test(t)) return '';
+      if (/TASK_\\d+/.test(t)) return t.slice(0, 200);
+      p = p.nextElementSibling; n++;
+    }
+    return '';
+  }
   document.querySelectorAll('[aria-label]').forEach(function(b){
     var l = b.getAttribute('aria-label') || '';
     if (!LAB.test(l)) return;
@@ -281,7 +323,7 @@ _MEDIA_JS = """(function(){
     var i = v ? null : b.querySelector('img[src^="blob:"]');
     if (!v && !i) return;
     out.push({kind: v ? 'video' : 'image', label:l, src: v ? (v.currentSrc||v.src) : i.src,
-              ctx: ctxOf(b)});
+              ctx: ctxOf(b), after: afterOf(b)});
   });
   return out;
 })()"""
@@ -518,8 +560,12 @@ class MuseLane:
         except Exception:
             pass
         try:
-            msg = (f'[Muse] Hết giờ chờ, Muse chỉ trả lời bằng chữ (không có ảnh/video): {reply}'
-                   if kind == 'text' else f'[Muse] Muse từ chối tạo: {reply}')
+            if reply.startswith('error creating media'):
+                msg = f'[Muse] {reply}'
+            elif kind == 'text':
+                msg = f'[Muse] Hết giờ chờ, Muse chỉ trả lời bằng chữ (không có ảnh/video): {reply}'
+            else:
+                msg = f'[Muse] Muse từ chối tạo: {reply}'
             self.w._req('POST', f'{FLOW_SERVER}/api/media/task/error',
                         body={'taskId': tid, 'machineCode': self.machine_code, 'toDraft': True,
                               'errorMessage': msg[:1000]})

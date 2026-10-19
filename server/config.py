@@ -163,7 +163,7 @@ _DEFAULT_SERVER_SETTINGS = {
     'muse_batch_gap_secs': 30,   # khoảng cách giữa 2 lô (giây, tính từ lúc gửi lô trước)
     'muse_prefix_video':   'I want to create a video of ',
     'muse_prefix_image':   'I want to create an image of ',
-    'muse_aspect_suffix':  ', aspect ratio {ratio}',   # {ratio} = tỉ lệ khung hình project (16:9…)
+    'muse_aspect_suffix':  ', aspect ratio {ratio}. You must return the generated {kind} for {task} as the result, not a text-only reply. When it is created successfully, reply exactly: "{task} created successfully." If it fails or you refuse, reply exactly: "{task} error creating media; reason: <short reason>".',   # {ratio} {task} {kind}
     'muse_name_token':     1,    # kèm mã m<task_id> để gán kết quả về đúng task
     'muse_image_timeout':  300,  # giây chờ ảnh
     'muse_video_timeout':  600,  # giây chờ video

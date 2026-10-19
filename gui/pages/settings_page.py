@@ -130,9 +130,10 @@ _TABS = [
          'Gắn vào ĐẦU prompt của task video. Mặc định: "I want to create a video of ".'),
         ('muse_prefix_image',              'Tiền tố prompt ẢNH', 'str',
          'Gắn vào ĐẦU prompt của task ảnh. Mặc định: "I want to create an image of ".'),
-        ('muse_aspect_suffix',             'Hậu tố tỉ lệ khung hình', 'str',
-         'Gắn vào CUỐI prompt, {ratio} = tỉ lệ project đã chọn (16:9, 9:16…). '
-         'Mặc định ", aspect ratio {ratio}". Để trống = không thêm.'),
+        ('muse_aspect_suffix',             'Hậu tố prompt (tỉ lệ + yêu cầu trả kết quả)', 'str',
+         'Gắn vào CUỐI prompt. Biến: {ratio} = tỉ lệ project (16:9, 9:16…), {task} = TASK_<id>, '
+         '{kind} = video/image. Mặc định đã gồm câu ép Muse trả ảnh/video và định dạng báo '
+         '"TASK_x created successfully." / "TASK_x error creating media; reason: …". Để trống = không thêm.'),
         ('muse_name_token',                'Kèm mã TASK_<id>: đầu prompt', 'bool',
          'Như VEO: prompt gửi Muse mang "TASK_<id>:" ngay sau tiền tố để gán kết quả về đúng task '
          '(Muse đặt tên file theo mã đầu prompt). Tắt = gán theo mã gốc trong prompt (CUE_…/SCENE_…) '
