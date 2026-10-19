@@ -82,6 +82,7 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(self._page_settings)
 
         self._page_profiles.open_logs.connect(self._goto_logs)
+        self._page_profiles.auto_update_toggled.connect(self._set_auto_update)
 
         # Status bar
         sb = QStatusBar()
@@ -199,7 +200,12 @@ class MainWindow(QMainWindow):
     _OFFLINE_THRESHOLD_SECS = 25  # không hiện "offline" trừ khi KHÔNG có lần
                                    # poll thành công nào trong khoảng này
 
+    def _set_auto_update(self, on: bool):
+        self._auto_update = bool(on)
+
     def _tick(self):
+        if not getattr(self, '_auto_update', True):
+            return                       # người dùng đã tạm dừng cập nhật trạng thái dashboard
         if self._status_in_flight:
             # Van an toàn: ApiCall.run() luôn emit done/error nên flag này về lý
             # thuyết không bao giờ kẹt mãi, nhưng phòng hờ QThreadPool bị nghẽn

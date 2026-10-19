@@ -14,6 +14,7 @@ from ..style import C
 from ..widgets import btn, lbl, Badge, StatCard
 from ..api_client import api
 from ..profile_dialog import ProfileDialog
+from ..bulk_profile_dialog import BulkProfileDialog
 from server.run_hours import summarize_run_hours
 
 # (2026-08-10) Nhãn/màu ĐỌC ĐƯỢC cho "Loại" profile (worker_mode) — theo yêu
@@ -40,6 +41,7 @@ _TASK_MODE_ENGINE_BADGE = {
 
 class ProfilesPage(QWidget):
     open_logs = pyqtSignal(int)
+    auto_update_toggled = pyqtSignal(bool)   # True = tự cập nhật trạng thái dashboard
 
     # (2026-08-10, theo yêu cầu user "cột trạng thái / token/ lỗi cũng làm
     # dang badge bỏ cột hôm nay") — gộp 3 cột Trạng thái/Tokens/Lỗi (trước
@@ -78,9 +80,19 @@ class ProfilesPage(QWidget):
 
         self._btn_refresh = btn('↻', 'icon', 'Làm mới (F5)')
         self._btn_refresh.setFixedSize(36, 36)
+        self._btn_auto = btn('⏸ Dừng cập nhật', '', 'Dừng/bật tự cập nhật trạng thái dashboard (mỗi 5s). ↻ vẫn làm mới tay.')
+        self._btn_auto.setFixedHeight(36)
+        self._btn_auto.setCheckable(True)
+        self._btn_auto.setChecked(True)          # checked = đang tự cập nhật
         self._btn_add = btn('+ Thêm profile', 'primary')
         self._btn_add.setFixedHeight(36)
+        self._btn_add_many = btn('+ Thêm nhiều', '', 'Thêm nhiều profile 1 lúc (mỗi dòng 1 profile)')
+        self._btn_add_many.setFixedHeight(36)
+        hdr.addWidget(self._btn_auto)
+        hdr.addSpacing(8)
         hdr.addWidget(self._btn_refresh)
+        hdr.addSpacing(8)
+        hdr.addWidget(self._btn_add_many)
         hdr.addSpacing(8)
         hdr.addWidget(self._btn_add)
         lay.addLayout(hdr)
@@ -141,6 +153,8 @@ class ProfilesPage(QWidget):
 
         # Connections
         self._btn_add.clicked.connect(self._add)
+        self._btn_add_many.clicked.connect(self._add_many)
+        self._btn_auto.toggled.connect(self._on_auto_toggled)
         self._btn_refresh.clicked.connect(self.refresh)
 
     # ── Data ──────────────────────────────────────────────────────────────────
@@ -577,6 +591,43 @@ class ProfilesPage(QWidget):
         if dlg.exec() != QDialog.DialogCode.Accepted: return
         api('POST', '/api/selenium/profiles', dlg.get_data(),
             on_done=lambda r: self._chk(r) or self.refresh())
+
+    def _on_auto_toggled(self, on: bool):
+        self._btn_auto.setText('⏸ Dừng cập nhật' if on else '▶ Bật cập nhật')
+        self.auto_update_toggled.emit(on)
+        if on:
+            self.refresh()
+
+    def _add_many(self):
+        dlg = BulkProfileDialog(self, self._profiles)
+        if dlg.exec() != QDialog.DialogCode.Accepted: return
+        items = dlg.get_profiles()
+        existing = {(x.get('profile_name') or '').lower() for x in self._profiles}
+        todo = [d for d in items if d['profile_name'].lower() not in existing]
+        skipped = [d['profile_name'] for d in items if d['profile_name'].lower() in existing]
+        result = {'ok': 0, 'err': []}
+
+        def step(i=0):
+            if i >= len(todo):
+                self.refresh()
+                msg = f'Đã thêm {result["ok"]}/{len(todo)} profile.'
+                if skipped:
+                    msg += '\nBỏ qua (đã tồn tại): ' + ', '.join(skipped)
+                if result['err']:
+                    msg += '\nLỗi:\n' + '\n'.join(result['err'][:8])
+                QMessageBox.information(self, 'Thêm nhiều profile', msg)
+                return
+            d = todo[i]
+
+            def done(r, d=d):
+                if isinstance(r, dict) and r.get('error'):
+                    result['err'].append(f'{d["profile_name"]}: {r["error"]}')
+                else:
+                    result['ok'] += 1
+                step(i + 1)
+            api('POST', '/api/selenium/profiles', d, on_done=done,
+                on_err=lambda m, d=d: (result['err'].append(f'{d["profile_name"]}: {m}'), step(i + 1)))
+        step()
 
     def _clone(self, p: dict):
         """Tạo profile mới từ profile cũ — chỉ copy thông số cài đặt (loại, mode, giờ chạy,
