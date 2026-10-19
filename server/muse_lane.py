@@ -77,7 +77,10 @@ def build_prompt(task: dict, settings: dict | None = None, with_token: bool = Tr
     note = ''
     if with_token and s.get('muse_name_token', 1):
         # Câu cuối: Muse báo lại bằng tiếng Anh khi tạo xong → tin nhắn có `TASK_<id>` để gán kết quả.
-        note = f' When it is created successfully, reply in English: "{task_token(task)} created successfully."'
+        tk = task_token(task)
+        note = (f' When it is created successfully, reply in English: "{tk} created successfully." '
+                f'If it fails or you refuse to create it, reply in English exactly in this format: '
+                f'"{tk} error creating media; reason: <short reason>".')
     return f'{prefix}{body}{suffix}{note}'
 
 
@@ -183,6 +186,12 @@ _REFUSAL_RE = re.compile(
 _MSG_SPLIT = re.compile(r'(User|Assistant)\s+message:')
 
 
+def err_regex(tid) -> 're.Pattern':
+    """`TASK_<id> error creating media; reason: ...` — định dạng lỗi do câu cuối prompt yêu cầu."""
+    return re.compile(r'TASK_%s(?!\d)\s*[:\-]?\s*error\s+creating\s+media\s*[;:,.\-]*\s*(?:reason\s*[:\-]?\s*)?([^\n]*)'
+                      % re.escape(str(tid)), re.I)
+
+
 def find_refusals(page_text: str, ids) -> dict:
     """{task_id: nội dung tin Muse từ chối}. Chỉ tính tin TRỢ LÝ nằm SAU tin người dùng gần nhất
     chứa `TASK_<id>` (task gửi lại thì lời từ chối cũ không tính) và câu từ chối phải nhắc `TASK_<id>`."""
@@ -199,9 +208,14 @@ def find_refusals(page_text: str, ids) -> dict:
                 last_user = i
         if last_user < 0:
             continue
+        errm = err_regex(tid)
         for role, txt in blocks[last_user + 1:]:
             if role != 'assistant':
                 continue
+            em = errm.search(txt)
+            if em:                                  # đúng format lỗi do prompt yêu cầu
+                out[tid] = f'error creating media; reason: {em.group(1).strip() or "(không nêu lý do)"}'
+                break
             for m in _REFUSAL_RE.finditer(txt):
                 seg_end = len(txt)
                 for sep in ('. ', chr(10)):
@@ -490,9 +504,11 @@ class MuseLane:
         except Exception:
             pass
         try:
+            msg = (f'[Muse] {reply}' if reply.startswith('error creating media')
+                   else f'[Muse] Muse từ chối tạo: {reply}')
             self.w._req('POST', f'{FLOW_SERVER}/api/media/task/error',
                         body={'taskId': tid, 'machineCode': self.machine_code, 'toDraft': True,
-                              'errorMessage': f'[Muse] Muse từ chối tạo: {reply}'[:1000]})
+                              'errorMessage': msg[:1000]})
         except Exception as e:
             self._log('warn', f'Báo draft về server lỗi: {e}')
         self._sent_drop(tid)
