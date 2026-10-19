@@ -47,7 +47,7 @@ from .managers import pm
 from .run_hours import in_run_hours
 
 MUSE_URL = 'https://muse.ai/'
-BUSY_LABELS = ['Dừng', 'Dừng nhiệm vụ']
+BUSY_LABELS = ['Dừng', 'Dừng nhiệm vụ', 'Stop', 'Stop task', 'Stop generating', 'Stop response']
 VIDEO_MODES = ('textToVideo', 'imageToVideo', 'componentsToVideo', 'frameToVideo')
 
 _ACCOUNT_BACKOFF_SECS = 600
@@ -74,14 +74,7 @@ def build_prompt(task: dict, settings: dict | None = None, with_token: bool = Tr
     # `TASK_<id>:` như VEO — mã để gán kết quả về đúng task (Muse đặt tên file theo mã đầu prompt).
     if with_token and s.get('muse_name_token', 1) and not _TASK_LEAD.match(body):
         body = f'{task_token(task)}: {body}'
-    note = ''
-    if with_token and s.get('muse_name_token', 1):
-        # Câu cuối: Muse báo lại bằng tiếng Anh khi tạo xong → tin nhắn có `TASK_<id>` để gán kết quả.
-        tk = task_token(task)
-        note = (f' When it is created successfully, reply in English: "{tk} created successfully." '
-                f'If it fails or you refuse to create it, reply in English exactly in this format: '
-                f'"{tk} error creating media; reason: <short reason>".')
-    return f'{prefix}{body}{suffix}{note}'
+    return f'{prefix}{body}{suffix}'
 
 
 _TASK_LEAD = re.compile(r'^\s*TASK_\d+')
@@ -152,18 +145,6 @@ def assign_media(tasks: list, media: list, order_fallback: bool = False) -> dict
         if len(cands) == 1:
             out[cands[0]['id']] = m
             left.remove(m)
-    # Tin "TASK_<id> created successfully." đứng SAU ô media — chỉ dùng khi chưa gán được bằng nhãn/tin trước
-    # (Muse có lúc ghi nhầm mã trong tin này, nên là tín hiệu yếu nhất).
-    for m in list(left):
-        after = (m.get('after') or '').lower().replace('_', '-')
-        mm = re.search(r'(?<![a-z0-9])task-(\d+)(?![a-z0-9])', after)
-        if not mm:
-            continue
-        t = next((x for x in tasks if x['id'] not in out and str(x['id']) == mm.group(1)
-                  and is_video_task(x) == (m.get('kind') == 'video')), None)
-        if t:
-            out[t['id']] = m
-            left.remove(m)
     if order_fallback:
         for t in tasks:
             if t['id'] in out or lead_slug(t):
@@ -182,23 +163,30 @@ def assign_media(tasks: list, media: list, order_fallback: bool = False) -> dict
 #        "I can't generate TASK_5515: CUE_282 as written." / "…TASK_5551: CUE_300 or TASK_5553: …"
 _REFUSAL_RE = re.compile(
     r"(?:I\s+(?:wasn['’]t|was\s+not|am\s+not|['’]m\s+not)\s+able\s+to|I\s+(?:can['’]t|cannot|couldn['’]t|could\s+not)|"
-    r"I['’]m\s+unable\s+to|I\s+am\s+unable\s+to|unable\s+to)\s+(?:generate|create|make|produce)", re.I)
-_MSG_SPLIT = re.compile(r'(User|Assistant)\s+message:')
+    r"I['’]m\s+unable\s+to|I\s+am\s+unable\s+to|unable\s+to)\s+(?:generate|create|make|produce)"
+    # Tiếng Việt: "không thể tạo/dựng/sinh/thực hiện", "chưa thể tạo", "không tạo được", "từ chối tạo"
+    r"|(?:không|chưa)\s+(?:thể|có\s+thể|được\s+phép)\s+(?:tạo|dựng|sinh|thực\s+hiện)"
+    r"|không\s+(?:tạo|dựng|sinh|thực\s+hiện)\s+được"
+    r"|từ\s+chối\s+(?:tạo|dựng|sinh)", re.I)
+# Nhãn vai trò thay đổi theo ngôn ngữ giao diện Muse (EN: "User message:", VI: "Tin nhắn của người dùng:").
+_MSG_SPLIT = re.compile(r'(User message|Assistant message|Tin nhắn của người dùng|Tin nhắn của Assistant)\s*:')
 
 
-def err_regex(tid) -> 're.Pattern':
-    """`TASK_<id> error creating media; reason: ...` — định dạng lỗi do câu cuối prompt yêu cầu."""
-    return re.compile(r'TASK_%s(?!\d)\s*[:\-]?\s*error\s+creating\s+media\s*[;:,.\-]*\s*(?:reason\s*[:\-]?\s*)?([^\n]*)'
-                      % re.escape(str(tid)), re.I)
+def _role(label: str) -> str:
+    l = (label or '').lower()
+    return 'user' if l.startswith('user') or 'người dùng' in l else 'assistant'
 
 
-def find_refusals(page_text: str, ids) -> dict:
-    """{task_id: nội dung tin Muse từ chối}. Chỉ tính tin TRỢ LÝ nằm SAU tin người dùng gần nhất
-    chứa `TASK_<id>` (task gửi lại thì lời từ chối cũ không tính) và câu từ chối phải nhắc `TASK_<id>`."""
+def _blocks(page_text: str) -> list:
     parts = _MSG_SPLIT.split(page_text or '')
-    blocks = []                                   # [(role, text)]
-    for i in range(1, len(parts) - 1, 2):
-        blocks.append((parts[i].lower(), parts[i + 1].strip()))
+    return [(_role(parts[i]), parts[i + 1].strip()) for i in range(1, len(parts) - 1, 2)]
+
+
+def find_replies(page_text: str, ids) -> dict:
+    """{task_id: nội dung chữ Muse trả lời} cho task chưa có media: các tin TRỢ LÝ nằm sau tin người dùng
+    gần nhất chứa `TASK_<id>`, tới trước tin người dùng kế tiếp; bỏ tin nhắc mã TASK của task KHÁC trong lô."""
+    blocks = _blocks(page_text)
+    idset = {str(i) for i in ids}
     out = {}
     for tid in ids:
         tok = re.compile(r'TASK_%s(?!\d)' % re.escape(str(tid)))
@@ -208,14 +196,37 @@ def find_refusals(page_text: str, ids) -> dict:
                 last_user = i
         if last_user < 0:
             continue
-        errm = err_regex(tid)
+        texts = []
+        for role, txt in blocks[last_user + 1:]:
+            if role == 'user':
+                break
+            if not txt:
+                continue
+            others = {m for m in re.findall(r'TASK_(\d+)', txt)} - {str(tid)}
+            if others & idset:
+                continue                    # tin này nói về task khác trong lô
+            texts.append(' '.join(txt.split()))
+        if texts:
+            out[tid] = ' '.join(texts)[:600]
+    return out
+
+
+def find_refusals(page_text: str, ids) -> dict:
+    """{task_id: nội dung tin Muse từ chối}. Chỉ tính tin TRỢ LÝ nằm SAU tin người dùng gần nhất
+    chứa `TASK_<id>` (task gửi lại thì lời từ chối cũ không tính) và câu từ chối phải nhắc `TASK_<id>`."""
+    blocks = _blocks(page_text)                    # [(role, text)]
+    out = {}
+    for tid in ids:
+        tok = re.compile(r'TASK_%s(?!\d)' % re.escape(str(tid)))
+        last_user = -1
+        for i, (role, txt) in enumerate(blocks):
+            if role == 'user' and tok.search(txt):
+                last_user = i
+        if last_user < 0:
+            continue
         for role, txt in blocks[last_user + 1:]:
             if role != 'assistant':
                 continue
-            em = errm.search(txt)
-            if em:                                  # đúng format lỗi do prompt yêu cầu
-                out[tid] = f'error creating media; reason: {em.group(1).strip() or "(không nêu lý do)"}'
-                break
             for m in _REFUSAL_RE.finditer(txt):
                 seg_end = len(txt)
                 for sep in ('. ', chr(10)):
@@ -237,8 +248,9 @@ _STATE_JS = """(function(){
     return %s.indexOf(b.getAttribute('aria-label')||'') >= 0; });
   var txt = (document.body && document.body.innerText) || '';
   return {url: location.href, ready: !!ta, busy: busy,
-          login: !ta && /Đăng nhập|Log in|waitlist/i.test(txt),
-          error: /Đã xảy ra lỗi/.test(txt) && !ta, vis: document.visibilityState};
+          login: !ta && /Đăng nhập|Đăng ký|Log in|Sign in|Sign up|waitlist|danh sách chờ/i.test(txt),
+          error: /Đã xảy ra lỗi|Something went wrong|An error occurred/i.test(txt) && !ta,
+          vis: document.visibilityState};
 })()""" % json.dumps(BUSY_LABELS)
 
 _MEDIA_JS = """(function(){
@@ -257,24 +269,8 @@ _MEDIA_JS = """(function(){
     var p = msg.previousElementSibling, n = 0;
     while (p && n < 3) {
       var t = (p.innerText || '');
-      if (!/^\\s*(Bạn|You)\\s*:/.test(t) && CODE.test(t)) return t.slice(0, 400);
+      if (!/^\\s*(Bạn|You|Tin nhắn của người dùng|User message)\\s*:/i.test(t) && CODE.test(t)) return t.slice(0, 400);
       p = p.previousElementSibling; n++;
-    }
-    return '';
-  }
-  // Tin báo SAU ô media: "TASK_<id> created successfully." (do câu cuối prompt yêu cầu). Dừng khi gặp tin
-  // người dùng kế tiếp để không lấy nhầm tin của task sau.
-  function afterOf(el){
-    var log = el.closest('[role=log]');
-    var msg = el;
-    while (log && msg.parentElement && msg.parentElement !== log) msg = msg.parentElement;
-    if (!log || msg.parentElement !== log) return '';
-    var p = msg.nextElementSibling, n = 0;
-    while (p && n < 3) {
-      var t = (p.innerText || '');
-      if (/^\\s*(Bạn|You)\\s*:/.test(t) || /^\\s*(Tin nhắn của người dùng)/.test(t)) return '';
-      if (/TASK_\\d+/.test(t)) return t.slice(0, 200);
-      p = p.nextElementSibling; n++;
     }
     return '';
   }
@@ -285,7 +281,7 @@ _MEDIA_JS = """(function(){
     var i = v ? null : b.querySelector('img[src^="blob:"]');
     if (!v && !i) return;
     out.push({kind: v ? 'video' : 'image', label:l, src: v ? (v.currentSrc||v.src) : i.src,
-              ctx: ctxOf(b), after: afterOf(b)});
+              ctx: ctxOf(b)});
   });
   return out;
 })()"""
@@ -294,8 +290,9 @@ _FOCUS_JS = "(function(){var t=document.querySelector('textarea'); if(!t) return
 _CLEAR_JS = ("(function(){var t=document.querySelector('textarea'); if(!t) return false;"
              "var d=Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value');"
              "d.set.call(t,''); t.dispatchEvent(new Event('input',{bubbles:true})); t.focus(); return true;})()")
-_REMOVE_SEL = ('button[aria-label="Remove attachment"], button[aria-label="Gỡ file đính kèm"], '
-               'button[aria-label="Gỡ tệp đính kèm"]')
+_REMOVE_SEL = ('button[aria-label="Remove attachment"], button[aria-label="Remove file"], '
+               'button[aria-label="Gỡ file đính kèm"], button[aria-label="Gỡ tệp đính kèm"], '
+               'button[aria-label="Xóa tệp đính kèm"], button[aria-label="Xóa tệp"]')
 _ATTACHED_JS = "document.querySelectorAll('%s').length" % _REMOVE_SEL.replace("'", "\'")
 _CLEAR_ATTACH_JS = ("(function(){var n=0;document.querySelectorAll('%s').forEach(function(b){b.click();n++;});return n;})()"
                     % _REMOVE_SEL.replace("'", "\'"))
@@ -483,7 +480,24 @@ class MuseLane:
             return {}
         return find_refusals(text, list(ids))
 
-    def _reject(self, task: dict, reply: str):
+    def _replies(self, ids) -> dict:
+        try:
+            text = self.tab.evaluate("document.body.innerText", timeout=30, await_promise=False) or ''
+        except Exception:
+            return {}
+        return find_replies(text, list(ids))
+
+    def _expire(self, tid, task: dict, default_msg: str):
+        """Hết hạn mà không có media: có chữ Muse trả lời (không phải ảnh/video) → lưu chữ đó làm lỗi
+        (đá về draft); không có gì → báo lỗi hết giờ như cũ."""
+        reply = self._replies([tid]).get(tid)
+        if reply:
+            self._reject(task, reply, kind='text')
+        else:
+            self._log('error', f'✘ Task #{tid}: {default_msg}')
+            self._report_error(tid, default_msg)
+
+    def _reject(self, task: dict, reply: str, kind: str = 'refuse'):
         """Muse từ chối tạo (trả lời chữ): lưu lý do vào lịch sử lỗi của task + ĐÁ VỀ DRAFT."""
         tid = task['id']
         reply = ' '.join((reply or '').split())
@@ -504,8 +518,8 @@ class MuseLane:
         except Exception:
             pass
         try:
-            msg = (f'[Muse] {reply}' if reply.startswith('error creating media')
-                   else f'[Muse] Muse từ chối tạo: {reply}')
+            msg = (f'[Muse] Hết giờ chờ, Muse chỉ trả lời bằng chữ (không có ảnh/video): {reply}'
+                   if kind == 'text' else f'[Muse] Muse từ chối tạo: {reply}')
             self.w._req('POST', f'{FLOW_SERVER}/api/media/task/error',
                         body={'taskId': tid, 'machineCode': self.machine_code, 'toDraft': True,
                               'errorMessage': msg[:1000]})
@@ -538,9 +552,7 @@ class MuseLane:
         for tid, (t, dl) in list(self._late.items()):
             if now >= dl:
                 self._late.pop(tid, None)
-                msg = 'Hết thời gian chờ kết quả từ Muse (kể cả chờ nền)'
-                self._log('error', f'✘ Task #{tid}: {msg}')
-                self._report_error(tid, msg)
+                self._expire(tid, t, 'Hết thời gian chờ kết quả từ Muse (kể cả chờ nền)')
 
     def _report_error(self, task_id, message: str):
         self.error_count += 1
@@ -713,9 +725,7 @@ class MuseLane:
                 self._log('warn', f'⏳ Task #{tid}: chưa có kết quả sau {timeout}s — chờ nền thêm {grace}s '
                                   f'(chưa báo lỗi để không bị giao trùng)')
                 continue
-            msg = f'Hết {timeout}s chưa có kết quả từ Muse'
-            self._log('error', f'✘ Task #{tid}: {msg}')
-            self._report_error(tid, msg)
+            self._expire(tid, t, f'Hết {timeout}s chưa có kết quả từ Muse')
 
     # ── gửi 1 task vào chat ───────────────────────────────────────────────────
     def _send(self, task: dict):
