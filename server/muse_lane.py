@@ -703,6 +703,26 @@ class MuseLane:
         finally:
             self.inflight = 0
 
+    def _cold_start_wait(self):
+        """Lần gửi đầu sau khi profile vừa khởi động: chờ ô chat gõ được (tín hiệu `ready`) rồi chờ thêm
+        `muse_first_send_delay_secs` giây cho trang ổn định mới gửi. Chỉ làm 1 lần mỗi lần khởi động."""
+        if not getattr(self, '_cold', True):
+            return
+        self._cold = False
+        delay = max(0.0, float(self._settings().get('muse_first_send_delay_secs') or 0))
+        if delay <= 0:
+            return
+        t0 = time.time()
+        while not self._stopped() and time.time() - t0 < 60:
+            try:
+                if self._state().get('ready'):
+                    break
+            except Exception:
+                pass
+            time.sleep(1)
+        self._log('info', f'⏳ Profile vừa khởi động — chờ thêm {delay:.0f}s cho trang Muse ổn định rồi mới gửi task')
+        self.w._stop.wait(delay)
+
     def _run_batch_inner(self, tasks: list):
         for t in tasks:
             try:
@@ -710,6 +730,7 @@ class MuseLane:
                             body={'taskId': t['id'], 'machineCode': self.machine_code})
             except Exception:
                 pass
+        self._cold_start_wait()
         baseline = {m['src'] for m in self._media()} | self._seen
         sent = []
         task_gap = max(0, float(self._settings().get('muse_task_gap_secs') or 0))

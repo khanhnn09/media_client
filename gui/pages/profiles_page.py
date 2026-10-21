@@ -1,6 +1,7 @@
 """Trang Profiles — dashboard (StatCard) + bảng quản lý profile Chrome
 (start/stop/mở login/sửa/xoá), hiển thị live task/lỗi/sleep countdown theo profile."""
 
+import json
 import time
 
 from PyQt6.QtCore import Qt, pyqtSignal
@@ -61,6 +62,8 @@ class ProfilesPage(QWidget):
         super().__init__()
         self._profiles: list[dict] = []
         self._filter_text = ''
+        self._last_sig = None                # chữ ký dữ liệu lần dựng bảng gần nhất (bỏ qua dựng lại nếu không đổi)
+        self._dirty = False                  # có dữ liệu mới nhưng bảng đang ẩn → dựng khi hiện lại
         self._checked: set[int] = set()     # profile được tick checkbox (giữ qua các lần làm mới)
         self._build()
 
@@ -217,7 +220,30 @@ class ProfilesPage(QWidget):
         self._stat_errors.set_value(n_errors, dim=(n_errors == 0))
         self._sub_lbl.setText(f'{n} profile • {n_run} worker đang chạy • {n_free} rảnh')
 
+        # Chỉ dựng lại bảng khi dữ liệu THẬT SỰ đổi (dựng lại hàng chục dòng widget mỗi 5s làm tool giật).
+        # Có worker đang chạy task / profile đang ngủ thì chữ đếm giây phải nhích → thêm mốc 10s vào chữ ký.
+        ticking = any(p.get('liveTaskId') or p.get('status') == 'sleeping' for p in self._profiles)
+        try:
+            sig = json.dumps(self._profiles, sort_keys=True, default=str, ensure_ascii=False)
+        except Exception:
+            sig = None
+        if sig is not None:
+            sig += f'|{int(time.time() // 10) if ticking else 0}|{self._filter_text}'
+            if sig == self._last_sig:
+                return
+        if not self.isVisible():
+            self._dirty = True               # đang ở trang khác: khỏi tốn công, dựng khi quay lại
+            return
+        self._last_sig = sig
+        self._dirty = False
         self._populate()
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        if self._dirty:
+            self._dirty = False
+            self._last_sig = None
+            self._populate()
 
     def _on_search(self, text: str):
         self._filter_text = text.strip().lower()

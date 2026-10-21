@@ -160,6 +160,7 @@ _DEFAULT_SERVER_SETTINGS = {
     'muse_batch_size':     2,    # số task gửi đồng thời trong 1 lô (1-5)
     'muse_task_gap_secs': 5,     # khoảng cách giữa 2 task liên tiếp TRONG 1 lô (giây)
     'muse_late_grace_secs': 900,   # chờ nền thêm sau khi hết giờ trong lô (0 = báo lỗi ngay)
+    'muse_first_send_delay_secs': 15,   # profile vừa khởi động: chờ thêm N giây sau khi gõ được vào ô chat rồi mới gửi task đầu
     'muse_batch_gap_secs': 30,   # khoảng cách giữa 2 lô (giây, tính từ lúc gửi lô trước)
     'muse_prefix_video':   'I want to create a video of ',
     'muse_prefix_image':   'I want to create an image of ',

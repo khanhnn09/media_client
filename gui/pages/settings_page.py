@@ -124,6 +124,9 @@ _TABS = [
          'Hết giờ trong lô mà chưa có kết quả: chưa báo lỗi, chờ nền thêm bấy nhiêu giây (tránh task bị giao trùng cho tài khoản Muse khác). 0 = báo lỗi ngay.'),
         ('muse_task_gap_secs',             'Khoảng cách giữa các task trong lô (giây)', 'int',
          'Nghỉ bấy nhiêu giây giữa 2 lần gửi task liên tiếp trong cùng 1 lô (0 = gửi liền).'),
+        ('muse_first_send_delay_secs',     'Chờ khi profile vừa khởi động (giây)', 'int',
+         'Lần nhận task đầu tiên sau khi mở profile: đợi ô chat Muse gõ được rồi chờ thêm số giây này '
+         'mới gửi task, để trang ổn định. 0 = gửi ngay.'),
         ('muse_batch_gap_secs',            'Khoảng cách giữa 2 lô (giây)', 'int',
          'Tính từ lúc gửi lô trước tới lúc nhận lô kế (giây). Lô chạy lâu hơn thì không chờ thêm.'),
         ('muse_prefix_video',              'Tiền tố prompt VIDEO', 'str',

@@ -110,6 +110,11 @@ class LogsPage(QWidget):
     # ── Public ────────────────────────────────────────────────────────────────
 
     def update_profiles(self, profiles: list[dict]):
+        names = [(p['id'], p['profile_name']) for p in profiles]
+        if names == getattr(self, '_names_sig', None):
+            self._profiles = profiles        # danh sách không đổi → khỏi dựng lại combobox
+            return
+        self._names_sig = names
         self._profiles = profiles
         cur = self._profile_cb.currentData()
         self._profile_cb.blockSignals(True)

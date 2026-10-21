@@ -45,6 +45,10 @@ def _to_bool01(v, default) -> int:
     return 1 if default else 0
 
 
+# Mặc định cũ của `muse_aspect_suffix` (chỉ tỉ lệ) — đã lưu nguyên giá trị này nghĩa là chưa tuỳ chỉnh.
+_OLD_MUSE_SUFFIX_DEFAULTS = (', aspect ratio {ratio}', ',aspect ratio {ratio}')
+
+
 _lock  = threading.RLock()  # RLock — update_local_settings() gọi lại get_local_settings()
 _cache: dict | None = None
 
@@ -87,7 +91,7 @@ def _clamp(settings: dict) -> dict:
             s['muse_batch_size'] = max(1, min(int(s['muse_batch_size']), 5))
         except (TypeError, ValueError):
             s['muse_batch_size'] = _DEFAULT_SERVER_SETTINGS['muse_batch_size']
-    for k in ('muse_late_grace_secs', 'muse_task_gap_secs', 'muse_batch_gap_secs', 'muse_image_timeout', 'muse_video_timeout'):
+    for k in ('muse_late_grace_secs', 'muse_first_send_delay_secs', 'muse_task_gap_secs', 'muse_batch_gap_secs', 'muse_image_timeout', 'muse_video_timeout'):
         if k in s:
             try:
                 s[k] = max(0, int(float(s[k])))
@@ -195,6 +199,9 @@ def get_local_settings() -> dict:
                     saved = json.load(f)
                 if isinstance(saved, dict):
                     merged.update(saved)
+                    # Giá trị đã lưu đúng bằng mặc định CŨ (người dùng chưa tự sửa) → dùng mặc định mới.
+                    if (saved.get('muse_aspect_suffix') or '').strip() in _OLD_MUSE_SUFFIX_DEFAULTS:
+                        merged['muse_aspect_suffix'] = _DEFAULT_SERVER_SETTINGS['muse_aspect_suffix']
             except Exception as e:
                 log.warning(f'[local_settings] Không đọc được {_LOCAL_SETTINGS_PATH}: {e}')
         merged = _clamp(merged)
