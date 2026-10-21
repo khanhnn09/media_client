@@ -109,11 +109,17 @@ def _no_zero(text: str) -> str:
     return re.sub(r'-0+(?=\d)', '-', text)
 
 
-def assign_media(tasks: list, media: list, order_fallback: bool = False) -> dict:
+def assign_media(tasks: list, media: list, order_fallback: bool = False, wrong_kind: bool = False) -> dict:
     """Gán media mới (list {kind,label,src}, theo thứ tự xuất hiện) cho task: theo
     `task-<id>` rồi mã đầu prompt gốc trong nhãn; `order_fallback` mới gán theo thứ tự
-    (cùng loại ảnh/video) cho task KHÔNG có mã nào. Trả {task_id: media}."""
+    (cùng loại ảnh/video) cho task KHÔNG có mã nào. Trả {task_id: media}.
+
+    `wrong_kind=True`: ngược lại — tìm media KHỚP MÃ task nhưng SAI LOẠI (task video mà Muse tạo ảnh, hoặc ngược
+    lại) để báo lỗi; không dùng thứ tự."""
     out: dict = {}
+
+    def kind_ok(t, m) -> bool:
+        return (is_video_task(t) == (m.get('kind') == 'video')) != wrong_kind
     left = list(media)
     leads = [lead_slug(t) for t in tasks if lead_slug(t)]
     for t in tasks:
@@ -122,10 +128,13 @@ def assign_media(tasks: list, media: list, order_fallback: bool = False) -> dict
             ls = ''                  # mã đầu prompt trùng giữa 2 task (khác project) → không dùng
         keys = [k for k in (task_slug(t), ls) if k]
         hit = None
+        want_kind = ('video' if is_video_task(t) else 'image')    # task video CHỈ nhận video, task ảnh CHỈ nhận ảnh
+        if wrong_kind:
+            want_kind = 'image' if want_kind == 'video' else 'video'
         for k in keys:                       # mã đầu prompt trước, rồi mã m<id>
             k = _no_zero(k)
             hit = next((m for m in left
-                        if re.search(r'(?<![a-z0-9])' + re.escape(k) + r'(?![a-z0-9])',
+                        if m.get('kind') == want_kind and re.search(r'(?<![a-z0-9])' + re.escape(k) + r'(?![a-z0-9])',
                                      _no_zero((m.get('label') or '').lower().replace('_', '-')))), None)
             if hit:
                 break
@@ -140,7 +149,7 @@ def assign_media(tasks: list, media: list, order_fallback: bool = False) -> dict
             continue
         cands = []
         for t in tasks:
-            if t['id'] in out or is_video_task(t) != (m.get('kind') == 'video'):
+            if t['id'] in out or not kind_ok(t, m):
                 continue
             ks = [task_slug(t)]          # CHỈ TASK_<id>: mã CUE_xx có thể trùng giữa các project
             if any(re.search(r'(?<![a-z0-9])' + re.escape(k) + r'(?![a-z0-9])', ctx) for k in ks):
@@ -156,11 +165,11 @@ def assign_media(tasks: list, media: list, order_fallback: bool = False) -> dict
         if not mm:
             continue
         t = next((x for x in tasks if x['id'] not in out and str(x['id']) == mm.group(1)
-                  and is_video_task(x) == (m.get('kind') == 'video')), None)
+                  and kind_ok(x, m)), None)
         if t:
             out[t['id']] = m
             left.remove(m)
-    if order_fallback:
+    if order_fallback and not wrong_kind:
         for t in tasks:
             if t['id'] in out or lead_slug(t):
                 continue                 # task có mã đầu chỉ nhận media ĐÚNG mã, không đoán theo thứ tự
@@ -520,6 +529,9 @@ class MuseLane:
         media = [m for m in self._media() if m['src'] not in self._seen]
         got = assign_media(stubs, media, order_fallback=False) if media else {}
         rest = [t for t in stubs if t['id'] not in got]
+        used = {id(m) for m in got.values()}
+        wrong = self._reject_wrong_kind(rest, [m for m in media if id(m) not in used])
+        rest = [t for t in rest if t['id'] not in wrong]
         for tid, reply in (self._refusals([t['id'] for t in rest]) if rest else {}).items():
             self._reject(next(t for t in rest if t['id'] == tid), reply)
         if not got:
@@ -548,6 +560,29 @@ class MuseLane:
             return {}
         return find_replies(text, list(ids))
 
+    _WRONG_KIND_GRACE = 20      # giây chờ media ĐÚNG loại sau khi thấy media sai loại (Muse có thể tạo ảnh rồi mới ra video)
+
+    def _reject_wrong_kind(self, tasks: list, media: list) -> set:
+        """Task video mà Muse tạo ẢNH (hoặc ngược lại): media khớp mã task nhưng SAI LOẠI. Sau
+        `_WRONG_KIND_GRACE` giây vẫn chưa có media đúng loại → báo lỗi 'tạo sai' + đá về draft. Trả tập id đã xử lý."""
+        if not tasks or not media:
+            return set()
+        seen = self.__dict__.setdefault('_wrong_seen', {})
+        done = set()
+        now = time.time()
+        for tid, m in assign_media(tasks, media, wrong_kind=True).items():
+            first = seen.setdefault((tid, m['src']), now)
+            if now - first < self._WRONG_KIND_GRACE:
+                continue
+            task = next(t for t in tasks if t['id'] == tid)
+            want = 'video' if is_video_task(task) else 'image'
+            made = 'image' if want == 'video' else 'video'
+            self._seen.add(m['src'])
+            seen.pop((tid, m['src']), None)
+            self._reject(task, f'Muse tạo sai loại: đã tạo {made} thay vì {want}', kind='wrong')
+            done.add(tid)
+        return done
+
     def _expire(self, tid, task: dict, default_msg: str):
         """Hết hạn mà không có media: có chữ Muse trả lời (không phải ảnh/video) → lưu chữ đó làm lỗi
         (đá về draft); không có gì → báo lỗi hết giờ như cũ."""
@@ -562,7 +597,10 @@ class MuseLane:
         """Muse từ chối tạo (trả lời chữ): lưu lý do vào lịch sử lỗi của task + ĐÁ VỀ DRAFT."""
         tid = task['id']
         reply = ' '.join((reply or '').split())
-        self._log('error', f'✘ Task #{tid}: Muse từ chối tạo — đá về draft. Muse nói: {reply[:300]}')
+        if kind == 'wrong':
+            self._log('error', f'✘ Task #{tid}: {reply} — đá về draft')
+        else:
+            self._log('error', f'✘ Task #{tid}: Muse từ chối tạo — đá về draft. Muse nói: {reply[:300]}')
         self.error_count += 1
         try:
             pm.bump_task_stat(self.profile_id, 'error')
@@ -579,7 +617,9 @@ class MuseLane:
         except Exception:
             pass
         try:
-            if 'error creating media' in reply.lower():
+            if kind == 'wrong':
+                msg = f'[Muse] {reply}'
+            elif 'error creating media' in reply.lower():
                 msg = f'[Muse] {reply}'
             elif kind == 'text':
                 msg = f'[Muse] Hết giờ chờ, Muse chỉ trả lời bằng chữ (không có ảnh/video): {reply}'
@@ -609,6 +649,10 @@ class MuseLane:
             except Exception as e:
                 self._log('error', f'✘ Task #{tid}: {e}')
                 self._report_error(tid, str(e))
+        used = {id(m) for m in got.values()}
+        for tid in self._reject_wrong_kind([t for t, _ in self._late.values()],
+                                           [m for m in media if id(m) not in used]):
+            self._late.pop(tid, None)
         rest = {tid: v for tid, v in self._late.items()}
         for tid, reply in self._refusals(list(rest)).items():
             if tid in self._late:
@@ -787,6 +831,10 @@ class MuseLane:
                     baseline.add(m['src'])
                     pending.pop(tid)
             if pending:
+                used = {id(m) for m in got.values()}
+                for tid in self._reject_wrong_kind(list(pending.values()), [m for m in new if id(m) not in used]):
+                    pending.pop(tid, None)
+            if pending:
                 for tid, reply in self._refusals(list(pending)).items():
                     if tid in pending and tid not in results:
                         self._reject(pending.pop(tid), reply)
@@ -881,9 +929,15 @@ class MuseLane:
     # ── nhận kết quả ──────────────────────────────────────────────────────────
     def _finish(self, task: dict, media: dict):
         tid = task['id']
+        want = 'video' if is_video_task(task) else 'image'
+        if media.get('kind') != want:
+            raise RuntimeError(f'Muse trả {media.get("kind")} nhưng task cần {want} — không cập nhật')
         r = self.tab.evaluate(_FETCH_JS % json.dumps(media['src']), timeout=240) or {}
         if r.get('error') or not r.get('b64'):
             raise RuntimeError(f'Tải kết quả lỗi: {r.get("error") or "rỗng"}')
+        mime = (r.get('type') or '').lower()
+        if mime and not mime.startswith(want + '/') and not mime.startswith('application/octet'):
+            raise RuntimeError(f'File tải về là {mime} nhưng task cần {want} — không cập nhật')
         data = base64.b64decode(r['b64'])
         if media['kind'] == 'video':
             self.w._upload_video_result(tid, data, source='muse', machine_code=self.machine_code)
