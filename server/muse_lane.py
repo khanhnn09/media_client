@@ -251,7 +251,7 @@ def find_refusals(page_text: str, ids) -> dict:
                 continue
             em = errm.search(txt)
             if em:                                  # đúng format lỗi do hậu tố prompt yêu cầu
-                out[tid] = f'error creating media; reason: {em.group(1).strip() or "(không nêu lý do)"}'
+                out[tid] = ' '.join(txt.split())[:800]      # lưu TOÀN BỘ chữ của tin báo lỗi
                 break
             for m in _REFUSAL_RE.finditer(txt):
                 seg_end = len(txt)
@@ -264,6 +264,25 @@ def find_refusals(page_text: str, ids) -> dict:
                     break
             if tid in out:
                 break
+    # Dự phòng KHÔNG phụ thuộc nhãn vai trò: giao diện/ngôn ngữ khác có thể không có "User message"/
+    # "Tin nhắn của …" nên không tách được tin. Quét thẳng cả trang tìm `TASK_<id> error creating media;
+    # reason: …`; bỏ qua chỗ chính là câu mẫu trong prompt (`<short reason>`) và tin cũ nằm TRƯỚC lần gửi
+    # gần nhất của task (prompt có `TASK_<id>:`).
+    text = page_text or ''
+    for tid in ids:
+        if tid in out:
+            continue
+        sent = text.rfind('TASK_%s:' % tid)
+        for m in err_regex(tid).finditer(text):
+            reason = m.group(1).strip()
+            if 'short reason' in reason.lower() or reason.startswith('<'):
+                continue                              # câu mẫu trong chính prompt
+            if m.start() < sent:
+                continue                              # tin lỗi cũ, trước lần gửi này
+            # Không có nhãn để biết tin kết thúc ở đâu → lấy từ chỗ khớp tới hết đoạn (tối đa 800 ký tự).
+            tail = text[m.start():m.start() + 800].split('\n\n')[0]
+            out[tid] = ' '.join(tail.split())
+            break
     return out
 
 
@@ -560,7 +579,7 @@ class MuseLane:
         except Exception:
             pass
         try:
-            if reply.startswith('error creating media'):
+            if 'error creating media' in reply.lower():
                 msg = f'[Muse] {reply}'
             elif kind == 'text':
                 msg = f'[Muse] Hết giờ chờ, Muse chỉ trả lời bằng chữ (không có ảnh/video): {reply}'
