@@ -45,6 +45,9 @@ _TABS = [
          'Chuột đi đường cong, gõ phím theo nhịp người thật khi thao tác giao diện (như launch(humanize=True)).'),
     ]),
     ('Flow', [
+        ('autoclose_grace_secs',           'Profile vừa mở: không tự đóng trong (giây)', 'int',
+         'Auto-scale đóng profile khi không còn task khớp. Profile vừa mở được giữ ít nhất số giây này '
+         '(tránh mở xong bị đóng ngay). 0 = đóng ngay như cũ.'),
         ('max_concurrent_veo3_profiles',   'Số profile VEO chạy đồng thời', 'int',
          'Tối đa bao nhiêu profile VEO (api/dom) được mở cùng lúc.'),
         ('api_fake_typing',                'Profile API: gõ prompt giả người dùng', 'bool',
@@ -86,6 +89,9 @@ _TABS = [
         ('flow_block_new_tab',             'Bị chặn: mở TAB MỚI vào lại project thay vì chờ', 'bool',
          'Gặp PUBLIC_ERROR_UNUSUAL_ACTIVITY: không tăng thời gian nghỉ nữa mà mở tab mới vào đúng project đó, '
          'đọc kết quả, gửi task tiếp rồi đóng tab cũ. Quá 3 lần liên tiếp vẫn bị chặn thì quay về nghỉ chờ.'),
+        ('flow_block_new_tab_task_delay_secs', 'Chế độ tab mới: hoãn task bị chặn (giây)', 'int',
+         'Khi bật "mở tab mới", task bị chặn chỉ hoãn ngắn (mặc định 30s) vì đã đổi tab; '
+         'không dùng mức hoãn dài 600s của chế độ nghỉ chờ.'),
         ('flow_block_task_delay_secs',       'Task bị chặn: hoãn trước khi giao lại (giây)', 'int', ''),
         ('flow_block_max_releases',          'Task bị chặn: số lần hoãn tối đa', 'int',
          'Quá số lần này thì báo lỗi task như bình thường.'),

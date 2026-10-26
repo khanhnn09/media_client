@@ -341,13 +341,31 @@ class UpscaleLane:
         still = []
         for rows in groups.values():
             ctx = rows[0]['ctx']
+            args = [None, None, [[r['up']] for r in rows]]
             try:
-                payload = self._be_call(ctx, flow_be.RPC_CHECK_VIDEO_STATUS,
-                                        [None, None, [[r['up']] for r in rows]])
+                payload = self._be_call(ctx, flow_be.RPC_CHECK_VIDEO_STATUS, args)
             except Exception as e:
-                self._log('warn', f'poll trạng thái lỗi: {e}')
-                still.extend(rows)
-                continue
+                # Tab đã bị đóng (vd worker mở tab mới vào lại project khi bị Google chặn) → gắn lại các
+                # job đang chạy sang tab còn sống rồi hỏi lại 1 lần; tên job upscale không phụ thuộc tab.
+                payload = None
+                rebound = False
+                if 'Không thấy tab' in str(e):
+                    try:
+                        if ctx.kind == 'veo':
+                            self._veo_tab = None
+                        new_ctx = self._ctx_for(ctx.project_id)
+                        if new_ctx:
+                            for r in rows:
+                                r['ctx'] = new_ctx
+                            self._log('info', f'Tab cũ đã đóng — gắn {len(rows)} job upscale sang tab mới')
+                            payload = self._be_call(new_ctx, flow_be.RPC_CHECK_VIDEO_STATUS, args)
+                            rebound = True
+                    except Exception as e2:
+                        self._log('warn', f'gắn lại tab cho job upscale lỗi: {e2}')
+                if not rebound:
+                    self._log('warn', f'poll trạng thái lỗi: {e}')
+                    still.extend(rows)
+                    continue
             for r in rows:
                 st = flow_be.parse_video_status(payload, r['up']) if payload else None
                 if st == 3:

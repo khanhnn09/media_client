@@ -5,6 +5,8 @@ import threading, time
 from datetime import datetime, time as dtime
 
 from .config import FLOW_SERVER, log, req_lib
+import time
+from .config import _profile_log
 from .managers import pm, bind_enabled_for
 from .worker import SeleniumFlowWorker
 from .local_settings import get_local_settings
@@ -17,6 +19,7 @@ from .state import (
     _gemini_pending_fail_streak, _GEMINI_PENDING_MAX_STALE_FAILS,
     _gemini_idle_since, _GEMINI_CLOSE_GRACE_SECS,
 )
+_worker_started_at: dict = {}      # pid -> thời điểm mở worker (để auto-scale không đóng profile vừa mở)
 from . import state as _state  # _master_task_intake_enabled bị REASSIGN — phải qua
                                 # module-qualified access, xem cảnh báo trong state.py
 
@@ -47,6 +50,7 @@ def _start_worker(profile: dict):
     t = threading.Thread(target=w.run, daemon=True, name=f'sel-worker-{pid}')
     t.start()
     _workers[pid] = (w, t)
+    _worker_started_at[pid] = time.time()
     return None
 
 
@@ -479,7 +483,18 @@ def _auto_scale_veo3_tick():
         w, _t = _workers[pid]
         if _worker_busy(w):
             continue
+        # Profile VỪA mở (Start tay hoặc auto) chưa kịp nhận task: giữ lại một lúc thay vì đóng ngay.
+        grace = int(get_local_settings().get('autoclose_grace_secs', 90) or 0)
+        age = time.time() - _worker_started_at.get(pid, 0)
+        if grace and age < grace:
+            continue
+        why = (f'Auto-scale: không còn task khớp (task_mode="{profile.get("task_mode")}", '
+               f'ảnh={pending.get("imageTotal")}, video={pending.get("videoTotal")}, tổng={pending.get("total")}) — tự đóng')
         log.info(f'[auto-scale] Profile {pid} hết task khớp task_mode "{profile.get("task_mode")}" — tự đóng')
+        try:
+            _profile_log(pid, 'info', why)           # ghi vào log RIÊNG của profile để biết vì sao nó tắt
+        except Exception:
+            pass
         _stop_worker(pid)
 
 

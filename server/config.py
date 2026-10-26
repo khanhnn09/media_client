@@ -214,7 +214,9 @@ _DEFAULT_SERVER_SETTINGS = {
     'flow_block_cooldown_max_secs': 1800,
     # Khi bị chặn: 0 = nghỉ tạo mới (cooldown tăng dần như trên); 1 = MỞ TAB MỚI vào lại đúng project,
     # đọc kết quả rồi gửi task tiếp, đóng tab cũ (tối đa 3 lần liên tiếp chưa thành công thì quay về nghỉ).
+    'autoclose_grace_secs': 90,   # profile VỪA mở: không auto-đóng vì "hết task" trong N giây đầu (0 = đóng ngay như cũ)
     'flow_block_new_tab': 0,
+    'flow_block_new_tab_task_delay_secs': 30,   # chế độ tab mới: hoãn task bị chặn ngắn thôi (tab đã đổi), không phải 600s
     'flow_block_task_delay_secs': 600,
     'flow_block_max_releases': 5,
     # Sau khi bị chặn: giãn cách gửi (thread_stagger_*) nhân `flow_block_slowdown_factor`

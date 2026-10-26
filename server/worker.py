@@ -8206,12 +8206,30 @@ class SeleniumFlowWorker:
                            f'thử lại; sau đó giãn nhịp gửi.')
         self._rotate_fingerprint_on_block()
 
+    _TAB_SWITCH_WAIT_MAX = 900     # giây chờ tối đa cho việc đang có (upscale) xong trước khi đổi tab
+
     def _switch_flow_tab_if_due(self) -> None:
         """Gọi ở LUỒNG CHÍNH (Selenium không an toàn đa luồng): nếu vừa bị chặn và bật
         `flow_block_new_tab` thì mở tab mới vào lại đúng project. Lỗi → quay về nghỉ chờ."""
         if not getattr(self, '_tab_switch_due', False):
             return
+        # Bị chặn: KHÔNG nhận/chạy task mới (heartbeat chỉ giữ kết nối), nhưng phải để mọi việc ĐANG CÓ
+        # (nhất là job upscale — chạy ngay trên tab VEO, đổi tab giữa chừng sẽ làm hỏng) xong hoặc báo lỗi
+        # rồi mới mở tab mới. Quá `_TAB_SWITCH_WAIT_MAX` giây vẫn chưa xong thì đổi luôn (tránh kẹt vĩnh viễn).
+        now = time.time()
+        since = getattr(self, '_tab_switch_wait_since', None)
+        if since is None:
+            since = self._tab_switch_wait_since = now
+        if self._upscale_busy and now - since < self._TAB_SWITCH_WAIT_MAX:
+            if now - getattr(self, '_tab_switch_wait_log_at', 0) >= 30:
+                self._tab_switch_wait_log_at = now
+                self._log('info', f'⏳ Bị chặn — chờ upscale đang chạy hoàn tất/báo lỗi rồi mới mở tab mới '
+                                  f'({int(now - since)}s)')
+            return
+        if self._upscale_busy:
+            self._log('warn', f'Upscale vẫn chưa xong sau {self._TAB_SWITCH_WAIT_MAX}s — mở tab mới luôn')
         self._tab_switch_due = False
+        self._tab_switch_wait_since = None
         try:
             self._switch_flow_tab()
         except Exception as e:
@@ -8245,6 +8263,12 @@ class SeleniumFlowWorker:
             self._install_chrome_fingerprint(d)
             self._be_interceptor_installed = False
             self._be_session_cache = None
+            try:        # cài bộ bắt batchexecute TRƯỚC khi vào trang → khỏi phải refresh thêm để lấy token
+                self._cdp('Page.enable', {})
+                self._cdp('Page.addScriptToEvaluateOnNewDocument', {'source': BE_INTERCEPTOR_JS})
+                self._be_interceptor_installed = True
+            except Exception as e:
+                self._log('warn', f'Không cài được bộ bắt batchexecute ở tab mới: {e}')
             self._nav_get(url, 'Google chặn tài khoản: mở tab mới vào lại đúng project')
             deadline = time.time() + 40
             while time.time() < deadline and not self._stop.is_set():
@@ -8308,6 +8332,8 @@ class SeleniumFlowWorker:
             self._log('warn', f'Task #{task_id} đã hoãn {n} lần vì tài khoản bị chặn — báo lỗi như thường')
             return False
         delay = int(st.get('flow_block_task_delay_secs', 600) or 0)
+        if getattr(self, '_tab_switch_due', False):         # sắp mở tab mới → hoãn ngắn để gửi lại ngay sau đó
+            delay = int(st.get('flow_block_new_tab_task_delay_secs', 30) or 0)
         try:
             r = self._req('POST', f'{FLOW_SERVER}/api/media/task/release',
                           body={'taskId': task_id, 'machineCode': self.machine_code,
@@ -9310,8 +9336,8 @@ class SeleniumFlowWorker:
                     self._log('info', f'⏸ Nghỉ nhận task {int(blocked_left)}s (tài khoản bị Google chặn)')
                 else:
                     self._log('info', '▶ Hết nghỉ vì bị chặn — nhận task lại (giãn nhịp gửi thêm một thời gian)')
-            if blocked_left:
-                outside_hours = True
+            if blocked_left or getattr(self, '_tab_switch_due', False):
+                outside_hours = True           # bị chặn: ngừng nhận việc mới, chỉ giữ kết nối
             # (2026-10-17) Hết credit (bản đọc còn mới) → chỉ giữ last_seen; stale quá
             # 2h thì đọc lại ngay (luồng chính, không phải keepalive thread).
             if not keepalive_only and self.worker_mode in ('api', 'dom'):

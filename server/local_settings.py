@@ -130,7 +130,7 @@ def _clamp(settings: dict) -> dict:
             s['max_project_media_items'] = _DEFAULT_SERVER_SETTINGS['max_project_media_items']
 
     # (2026-09-29) Chặn tầng tài khoản — xem config.py.
-    for k in ('flow_block_task_delay_secs', 'submit_pause_every', 'submit_pause_secs'):
+    for k in ('autoclose_grace_secs', 'flow_block_task_delay_secs', 'flow_block_new_tab_task_delay_secs', 'submit_pause_every', 'submit_pause_secs'):
         if k in s:
             try:
                 s[k] = max(0, int(s[k]))
