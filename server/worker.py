@@ -35,6 +35,7 @@ from .chrome_utils import (
     _usable_profile_dir,
 )
 from .state import _login_drivers, _sleep_until_by_pid, _force_login_check
+_tabswitch_streak_by_pid: dict = {}     # số lần liên tiếp phải mở tab mới do bị chặn (reset khi có task thành công)
 from .state import (_flow_block_until_by_pid, _flow_block_level_by_pid,
                     _flow_block_last_at_by_pid, _flow_release_counts)
 
@@ -7356,6 +7357,7 @@ class SeleniumFlowWorker:
         }
 
     def _handle_task_success(self):
+        _tabswitch_streak_by_pid.pop(self.profile_id, None)
         self._task_done_count += 1
         self._current_task = None
         self._consecutive_errors = 0
@@ -8180,9 +8182,19 @@ class SeleniumFlowWorker:
         self._batch_blocked = True
         now = time.time()
         _flow_block_last_at_by_pid[self.profile_id] = now
-        if self._flow_block_remaining() > 0:
+        if self._flow_block_remaining() > 0 or getattr(self, '_tab_switch_due', False):
             return
         st = self._server_settings
+        if int(st.get('flow_block_new_tab', 0) or 0):
+            streak = _tabswitch_streak_by_pid.get(self.profile_id, 0)
+            if streak < 3:
+                _tabswitch_streak_by_pid[self.profile_id] = streak + 1
+                self._tab_switch_due = True
+                self._log('error', f'⛔ Google chặn tài khoản ({str(reason)[:160]}) — sẽ MỞ TAB MỚI vào lại đúng '
+                                   f'project, đọc kết quả rồi đóng tab cũ (lần {streak + 1}/3); task trả về hàng chờ '
+                                   f'KHÔNG trừ lượt thử lại.')
+                return
+            self._log('warn', 'Đã mở tab mới 3 lần liên tiếp mà vẫn bị chặn — quay về nghỉ chờ như thường')
         lo = int(st.get('flow_block_cooldown_min_secs', 300) or 300)
         hi = max(lo, int(st.get('flow_block_cooldown_max_secs', 1800) or lo))
         level = _flow_block_level_by_pid.get(self.profile_id, 0)
@@ -8193,6 +8205,77 @@ class SeleniumFlowWorker:
                            f'tiếp. Nghỉ tạo mới {secs}s, task trả về hàng chờ KHÔNG trừ lượt '
                            f'thử lại; sau đó giãn nhịp gửi.')
         self._rotate_fingerprint_on_block()
+
+    def _switch_flow_tab_if_due(self) -> None:
+        """Gọi ở LUỒNG CHÍNH (Selenium không an toàn đa luồng): nếu vừa bị chặn và bật
+        `flow_block_new_tab` thì mở tab mới vào lại đúng project. Lỗi → quay về nghỉ chờ."""
+        if not getattr(self, '_tab_switch_due', False):
+            return
+        self._tab_switch_due = False
+        try:
+            self._switch_flow_tab()
+        except Exception as e:
+            lo = int(self._server_settings.get('flow_block_cooldown_min_secs', 300) or 300)
+            _flow_block_until_by_pid[self.profile_id] = time.time() + lo
+            self._log('error', f'Mở tab mới lỗi: {e} — chuyển sang nghỉ chờ {lo}s')
+
+    def _switch_flow_tab(self) -> None:
+        """Mở TAB MỚI → vào đúng link project đang làm → (xong) đóng tab cũ → đọc kết quả. Cài lại
+        mọi thứ gắn theo từng tab (guard reCAPTCHA, ẩn webdriver, fingerprint, interceptor batchexecute)."""
+        d = self.driver
+        cur = ''
+        try:
+            cur = d.current_url or ''
+        except Exception:
+            pass
+        url = cur if '/project/' in cur else (self._bound_url() or (self.profile.get('project_url') or '').strip())
+        if not url:
+            raise RuntimeError('không xác định được link project để mở lại')
+        old = d.current_window_handle
+        d.switch_to.new_window('tab')
+        new = d.current_window_handle
+        try:
+            try:
+                d.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
+                    'source': "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"})
+                d.execute_cdp_cmd('Network.enable', {})
+            except Exception:
+                pass
+            self._install_recaptcha_guard(d)
+            self._install_chrome_fingerprint(d)
+            self._be_interceptor_installed = False
+            self._be_session_cache = None
+            self._nav_get(url, 'Google chặn tài khoản: mở tab mới vào lại đúng project')
+            deadline = time.time() + 40
+            while time.time() < deadline and not self._stop.is_set():
+                if self._project_page_ready():
+                    break
+                self._click_create_with_flow_if_present(timeout=2)
+                self._sleep(1.5)
+            if not self._project_page_ready():
+                raise RuntimeError('tab mới chưa vào được project')
+        except Exception:
+            try:
+                d.close()                       # đóng tab mới hỏng
+                d.switch_to.window(old)
+            except Exception:
+                pass
+            raise
+        try:                                    # tab mới OK → đóng tab cũ
+            d.switch_to.window(old)
+            d.close()
+        except Exception as e:
+            self._log('warn', f'Không đóng được tab cũ: {e}')
+        d.switch_to.window(new)
+        up = getattr(self, '_upscale_lane', None)
+        if up is not None:                      # làn upscale bám theo tab VEO
+            up.veo_handle = new
+            up._veo_tab = None
+        self._log('ok', 'Đã mở tab mới vào lại đúng project, đóng tab cũ — đọc kết quả rồi gửi tiếp')
+        try:
+            self._reconcile_project_media(set())
+        except Exception as e:
+            self._log('warn', f'Đọc kết quả ở tab mới lỗi: {e}')
 
     def _rotate_fingerprint_on_block(self) -> None:
         """(2026-10-03) Bật `cloak_rotate_fp_on_block`: đổi các MỤC fingerprint đã
@@ -9388,6 +9471,7 @@ class SeleniumFlowWorker:
                     continue
 
                 try:
+                    self._switch_flow_tab_if_due()
                     tasks = self._heartbeat()
                     if tasks:
                         if self._process_tasks(tasks):

@@ -83,6 +83,9 @@ _TABS = [
          'Khi Flow báo "hoạt động bất thường" (UNUSUAL_ACTIVITY/throttle): task trả về hàng chờ, '
          'KHÔNG trừ lượt thử lại; profile nghỉ tạo mới — gấp đôi mỗi lần bị chặn liên tiếp.'),
         ('flow_block_cooldown_max_secs',     'Google chặn tài khoản: nghỉ tối đa (giây)', 'int', ''),
+        ('flow_block_new_tab',             'Bị chặn: mở TAB MỚI vào lại project thay vì chờ', 'bool',
+         'Gặp PUBLIC_ERROR_UNUSUAL_ACTIVITY: không tăng thời gian nghỉ nữa mà mở tab mới vào đúng project đó, '
+         'đọc kết quả, gửi task tiếp rồi đóng tab cũ. Quá 3 lần liên tiếp vẫn bị chặn thì quay về nghỉ chờ.'),
         ('flow_block_task_delay_secs',       'Task bị chặn: hoãn trước khi giao lại (giây)', 'int', ''),
         ('flow_block_max_releases',          'Task bị chặn: số lần hoãn tối đa', 'int',
          'Quá số lần này thì báo lỗi task như bình thường.'),
