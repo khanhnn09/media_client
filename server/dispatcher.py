@@ -642,6 +642,7 @@ def _veo3_dispatcher_tick():
     img_wait, vid_wait, all_wait, gemini_img_wait, gemini_vid_wait = [], [], [], [], []
     omni_wait = []
     muse_wait = []
+    upscale_wait = []
     bound_wait = []
     for pid in waiting_pids:
         profile = pm.get(pid)
@@ -654,7 +655,9 @@ def _veo3_dispatcher_tick():
             continue
         wm = profile.get('worker_mode')
         tm = profile.get('task_mode') or 'all'
-        if wm == 'muse':
+        if wm in ('api', 'dom') and (pending.get('upscaleByMachine') or {}).get(f"selenium-{pid}"):
+            upscale_wait.append(profile)  # còn video cần upscale trên máy này — không cần ngân sách task
+        elif wm == 'muse':
             muse_wait.append(profile)  # ngân sách Muse riêng
         elif wm in ('api', 'dom') and not _veo_on(profile):
             omni_wait.append(profile)  # chỉ Omni → ngân sách Omni riêng
@@ -668,6 +671,10 @@ def _veo3_dispatcher_tick():
             (img_wait if tm == 'image_only' else vid_wait if tm == 'video_only' else all_wait).append(profile)
 
     to_promote = []
+    for profile in upscale_wait:
+        if len(to_promote) >= slots_free:
+            break
+        to_promote.append(profile)
     for profile in bound_wait:
         if len(to_promote) >= slots_free:
             break
