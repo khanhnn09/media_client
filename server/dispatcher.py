@@ -453,8 +453,10 @@ def _auto_scale_veo3_tick():
             continue
         if not _run_hours_gate(profile):
             continue
-        if not _credit_gate(profile):
-            continue
+        _has_upscale = (profile.get('worker_mode') in ('api', 'dom')
+                        and (pending.get('upscaleByMachine') or {}).get(f"selenium-{pid}"))
+        if not _has_upscale and not _credit_gate(profile):
+            continue  # còn upscale thì bỏ qua cổng credit (không tạo video mới)
 
         if _profile_veo3_eligible(profile, pending):
             _desired_veo3.add(pid)
