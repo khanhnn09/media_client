@@ -5,6 +5,8 @@
 # (2026-07-17) KHÔNG còn PyMySQL — client_tool không kết nối DB trực tiếp nữa, mọi
 # thao tác CRUD profile/extension/log đều qua HTTP API của backend (FLOW_API_URL).
 PyQt6>=6.6.0
+# (2026-10-30) Giao diện web nhúng trong cửa sổ chính (web/ + gui/main_window.py) cần QtWebEngine + QtWebChannel.
+PyQt6-WebEngine>=6.6.0
 Flask>=3.0.0
 flask-cors>=4.0.0
 python-dotenv>=1.0.0

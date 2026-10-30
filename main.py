@@ -9,17 +9,12 @@ VAI TRÒ: Điều khiển qua API http://localhost:13445 — server (selenium_fl
   riêng biệt. Đóng GUI = tắt hẳn server + mọi worker/Chrome cùng lúc, không có
   gì sống sót lại phía sau.
 
-CẤU TRÚC (tách từ 1 file selenium_gui.py ~1820 dòng thành package gui/ để dễ quản lý):
-  gui/config.py            → API_BASE, REFRESH_MS, LOG_REFRESH_MS
-  gui/style.py              → bảng màu C + QSS stylesheet
-  gui/api_client.py         → api()/api_sync() — gọi HTTP nội bộ, chạy nền QThreadPool
-  gui/widgets.py            → btn/sep/lbl/add_shadow/Badge/StatCard (dùng chung)
-  gui/sidebar.py            → Sidebar (nav + trạng thái server + master switch)
-  gui/profile_dialog.py     → ProfileDialog (thêm/sửa profile)
-  gui/pages/profiles_page.py    → ProfilesPage
-  gui/pages/extensions_page.py  → ExtensionsPage
-  gui/pages/logs_page.py        → LogsPage
-  gui/main_window.py        → MainWindow (ráp mọi thứ lại, khởi động server embedded)
+CẤU TRÚC (2026-10-30: giao diện đã chuyển sang WEB nhúng bằng QWebEngineView):
+  web/                     → giao diện (HTML/CSS/JS), phục vụ bởi Flask embedded tại /ui/
+  server/web_ui.py         → route /ui/, ui_meta, ui_format
+  gui/config.py, style.py  → API_BASE + bảng màu (login dialog, màn hình chờ)
+  gui/login_dialog.py      → đăng nhập (PyQt, chạy trước cửa sổ chính)
+  gui/main_window.py       → MainWindow = QWebEngineView + Bridge + khởi động server embedded
   File này (main.py) chỉ còn là entry point mỏng — dựng QApplication + palette
   rồi show MainWindow.
 """
@@ -27,6 +22,7 @@ CẤU TRÚC (tách từ 1 file selenium_gui.py ~1820 dòng thành package gui/ �
 import sys
 
 from dotenv import load_dotenv
+from PyQt6.QtCore import QCoreApplication, Qt
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QApplication, QDialog, QMessageBox
 
@@ -63,6 +59,8 @@ def _disable_console_quickedit():
 
 def main():
     _disable_console_quickedit()
+    # QtWebEngine (giao diện web nhúng): phải đặt trước khi tạo QApplication.
+    QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv)
     app.setApplicationName('Selenium Manager')
     app.setStyle('Fusion')

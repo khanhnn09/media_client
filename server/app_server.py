@@ -11,6 +11,7 @@ from .dispatcher import _stop_worker, _veo3_dispatcher_loop
 # routes phải được import (dù không dùng trực tiếp tên nào) để các @app.route(...)
 # đăng ký lên `app` — Flask không có route nào nếu module này chưa từng chạy.
 from . import routes as _routes  # noqa: F401
+from . import web_ui as _web_ui  # noqa: F401  (giao diện web /ui/ + ui_meta/ui_format)
 
 def shutdown_all_workers():
     """Dừng TẤT CẢ worker + đóng TẤT CẢ login browser đang mở — gọi khi process
