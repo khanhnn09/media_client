@@ -7341,7 +7341,13 @@ class SeleniumFlowWorker:
         """Snapshot trạng thái phiên chạy hiện tại, dùng bởi GET /api/selenium/status
         để dashboard (main.py) hiển thị live: task đang chạy, số lỗi, sleep."""
         t = self._current_task
+        lane = getattr(self, '_upscale_lane', None)
+        try:
+            up_jobs = lane.snapshot() if lane else []
+        except Exception:
+            up_jobs = []
         return {
+            'upscaleJobs':       up_jobs,
             'liveTaskId':        t['id']        if t else None,
             'liveTaskMode':      t['mode']       if t else None,
             'liveTaskPrompt':    t['prompt']     if t else None,

@@ -33,6 +33,7 @@ from .config import FLOW_SERVER
 
 POLL_SECS = 10
 JOB_TIMEOUT_SECS = 900
+QUEUE_STALE_SECS = 1500      # < 30 phút backend thu hồi, để job không bị chạy trùng 2 nơi
 # Nhận thêm việc chỉ khi hàng đợi + đang chạy dưới mức này. Backend đánh dấu
 # việc 'processing' ngay lúc giao và thu hồi sau 30 phút — ôm quá nhiều sẽ bị
 # giao lại trùng trước khi kịp làm.
@@ -93,6 +94,24 @@ class UpscaleLane:
     def can_accept(self) -> bool:
         return len(self._ids) < MAX_BACKLOG
 
+    def snapshot(self) -> list:
+        """Danh sách job upscale đang xử lý ở máy này (để hiển thị): [{taskId, nameId,
+        state: 'queued'|'sending'|'running', since}]."""
+        now = time.time()
+        out = []
+        with self._lock:
+            queued = list(self._queue)
+            running = list(self._running)
+        for r in running:
+            j = r['job']
+            out.append({'taskId': j.get('taskId'), 'nameId': j.get('nameId') or '',
+                        'state': 'running', 'since': r.get('t0'), 'elapsed': int(now - r.get('t0', now))})
+        for j in queued:
+            at = j.get('_enq_at') or now
+            out.append({'taskId': j.get('taskId'), 'nameId': j.get('nameId') or '',
+                        'state': 'queued', 'since': at, 'elapsed': int(now - at)})
+        return out
+
     def _log(self, level, msg):
         self.w._log(level, f'[upscale] {msg}')
 
@@ -104,6 +123,7 @@ class UpscaleLane:
         with self._lock:
             new = [j for j in jobs if j.get('taskId') and j['taskId'] not in self._ids]
             for j in new:
+                j['_enq_at'] = time.time()
                 self._ids.add(j['taskId'])
                 self._queue.append(j)
         if not new:
@@ -134,6 +154,7 @@ class UpscaleLane:
             except Exception:
                 pass
             now = time.time()
+            self._drop_stale_queue(now)
             if self._queue and now - self._last_send >= gap:
                 with self._lock:
                     job = self._queue.pop(0) if self._queue else None
@@ -152,6 +173,18 @@ class UpscaleLane:
             self._fail(r['job'], 'worker dừng giữa lúc upscale')
         for j in list(self._queue):
             self._fail(j, 'worker dừng trước khi kịp upscale')
+
+    def _drop_stale_queue(self, now: float):
+        """Job nằm hàng chờ quá QUEUE_STALE_SECS (vd tab phụ kẹt ở project khác mãi) → bỏ ra
+        khỏi hàng chờ cục bộ, KHÔNG báo lỗi: backend sẽ tự thu hồi và giao lại sau 30 phút."""
+        with self._lock:
+            stale = [j for j in self._queue if now - (j.get('_enq_at') or now) > QUEUE_STALE_SECS]
+            for j in stale:
+                self._queue.remove(j)
+                self._ids.discard(j.get('taskId'))
+        for j in stale:
+            self._log('warn', f'Bỏ upscale #{j["taskId"]} khỏi hàng chờ (quá {QUEUE_STALE_SECS // 60} phút '
+                              f'chưa gửi được) — chờ backend giao lại')
 
     # ── báo kết quả ────────────────────────────────────────────────────────
     def _done(self, job):

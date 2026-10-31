@@ -221,11 +221,24 @@ export function createProfilesPage(ctx) {
 
   function taskCell(p) {
     const id = p.liveTaskId || p.current_task_id;
-    if (!id) return h('span', { style: { color: 'var(--muted)' } }, '—');
-    const parts = [`#${id}`];
-    if (p.liveTaskMode) parts.push(p.liveTaskMode);
-    if (p.liveTaskStartedAt) parts.push(`${Math.floor(Date.now() / 1000 - p.liveTaskStartedAt)}s`);
-    return h('span', { style: { color: 'var(--yellow)' }, title: p.liveTaskPrompt || '' }, parts.join(' · '));
+    const ups = Array.isArray(p.upscaleJobs) ? p.upscaleJobs : [];
+    let main;
+    if (!id) main = h('span', { style: { color: 'var(--muted)' } }, ups.length ? '' : '—');
+    else {
+      const parts = [`#${id}`];
+      if (p.liveTaskMode) parts.push(p.liveTaskMode);
+      if (p.liveTaskStartedAt) parts.push(`${Math.floor(Date.now() / 1000 - p.liveTaskStartedAt)}s`);
+      main = h('span', { style: { color: 'var(--yellow)' }, title: p.liveTaskPrompt || '' }, parts.join(' · '));
+    }
+    if (!ups.length) return main;
+    // Job upscale 1080p đang chạy/chờ ở máy này — hiện rõ task nào, bao lâu.
+    const running = ups.filter((j) => j.state === 'running');
+    const shown = ups.slice(0, 3).map((j) => `#${j.taskId}${j.state === 'queued' ? ' (chờ)' : ''} ${j.elapsed || 0}s`).join(', ');
+    const more = ups.length > 3 ? ` +${ups.length - 3}` : '';
+    const tip = ups.map((j) => `#${j.taskId} ${j.nameId || ''} — ${j.state === 'running' ? 'đang upscale' : 'chờ gửi'} ${j.elapsed || 0}s`).join('\n');
+    return h('div', { class: 'stack' }, main,
+      h('span', { style: { color: 'var(--accent, #58a6ff)', fontSize: '11px' }, title: tip },
+        `⬆ Upscale ${running.length}/${ups.length}: ${shown}${more}`));
   }
 
   function autoCell(p) {
