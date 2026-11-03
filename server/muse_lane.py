@@ -597,6 +597,7 @@ class MuseLane:
         """Muse từ chối tạo (trả lời chữ): lưu lý do vào lịch sử lỗi của task + ĐÁ VỀ DRAFT."""
         tid = task['id']
         reply = ' '.join((reply or '').split())
+        self._check_stop_keywords(reply)
         if kind == 'wrong':
             self._log('error', f'✘ Task #{tid}: {reply} — đá về draft')
         else:
@@ -663,7 +664,35 @@ class MuseLane:
                 self._late.pop(tid, None)
                 self._expire(tid, t, 'Hết thời gian chờ kết quả từ Muse (kể cả chờ nền)')
 
+    def _check_stop_keywords(self, text: str):
+        """Lỗi trả về chứa từ khóa trong `muse_stop_keywords` (vd limit, timeout) → TẮT profile này
+        (enabled=0 + dừng worker) để auto-scale không tự mở lại tới khi bật tay."""
+        try:
+            kws = [k.strip().lower() for k in (get_local_settings().get('muse_stop_keywords') or []) if str(k).strip()]
+            low = (text or '').lower()
+            hit = next((k for k in kws if k in low), None)
+            if not hit or getattr(self, '_stop_triggered', False):
+                return
+            self._stop_triggered = True
+            self._log('error', f'⛔ Lỗi chứa từ khóa "{hit}" → tắt profile (enabled=0) và dừng worker')
+            pid = self.profile_id
+
+            def _do():
+                try:
+                    pm.update(pid, enabled=0)
+                except Exception as e:
+                    self._log('warn', f'Tắt profile lỗi: {e}')
+                try:
+                    from .dispatcher import _stop_worker
+                    _stop_worker(pid)
+                except Exception as e:
+                    self._log('warn', f'Dừng worker lỗi: {e}')
+            threading.Thread(target=_do, daemon=True).start()
+        except Exception:
+            pass
+
     def _report_error(self, task_id, message: str):
+        self._check_stop_keywords(message)
         self.error_count += 1
         try:
             pm.bump_task_stat(self.profile_id, 'error')

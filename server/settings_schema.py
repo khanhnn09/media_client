@@ -204,7 +204,9 @@ SETTINGS_TABS = [('Chung',
     'file theo mã đầu prompt). Tắt = gán theo mã gốc trong prompt (CUE_…/SCENE_…) rồi theo thứ tự — kém chắc '
     'chắn.'),
    ('muse_image_timeout', 'Chờ ảnh tối đa (giây)', 'int', ''),
-   ('muse_video_timeout', 'Chờ video tối đa (giây)', 'int', '')])]
+   ('muse_video_timeout', 'Chờ video tối đa (giây)', 'int', ''),
+   ('muse_stop_keywords', 'Từ khóa lỗi tự tắt profile', 'list',
+    'Lỗi của task Muse chứa một trong các từ này (không phân biệt hoa/thường) → tự tắt profile (enabled=0) và dừng worker. Phân cách bằng dấu phẩy, vd: limit, timeout. Để trống = không tự tắt.')])]
 
 # Setting đang ẩn (bậc thang time-window tạm tắt ở worker._record_error).
 HIDDEN_FIELDS = [('error_window_minutes', 'Cửa sổ thời gian tính lỗi (phút)', 'int', ''),

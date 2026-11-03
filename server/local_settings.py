@@ -156,12 +156,13 @@ def _clamp(settings: dict) -> dict:
             except (TypeError, ValueError):
                 s[k] = _DEFAULT_SERVER_SETTINGS.get(k, 1.0)
 
-    if 'error_patterns' in s:
-        v = s['error_patterns']
-        if isinstance(v, str):
-            s['error_patterns'] = [p.strip() for p in v.split(',') if p.strip()]
-        elif not isinstance(v, list):
-            s['error_patterns'] = []
+    for k in ('error_patterns', 'muse_stop_keywords'):
+        if k in s:
+            v = s[k]
+            if isinstance(v, str):
+                s[k] = [p.strip() for p in v.split(',') if p.strip()]
+            elif not isinstance(v, list):
+                s[k] = [] if k == 'error_patterns' else list(_DEFAULT_SERVER_SETTINGS[k])
 
     # Khung giờ không nhận task (2026-07-20) — quiet_hours_enabled xử lý chung ở
     # BOOL_KEYS bên dưới; quiet_hours_start/end là chuỗi "HH:MM" — validate bằng regex, sai định dạng

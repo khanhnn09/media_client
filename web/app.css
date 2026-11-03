@@ -134,10 +134,11 @@ tbody tr:last-child td { border-bottom:0; }
 .toast.ok { border-left-color:var(--green); } .toast.err { border-left-color:var(--red); }
 
 /* ── Settings ── */
-.set-row { padding:9px 0; border-bottom:1px solid #21262d; display:grid; grid-template-columns:1fr 200px; gap:24px; align-items:center; }
+.set-row { padding:9px 0; border-bottom:1px solid #21262d; display:grid; grid-template-columns:minmax(0,1fr) 260px; gap:24px; align-items:center; }
 .set-row:last-child { border-bottom:0; }
 .set-row.bool { grid-template-columns:1fr; }
 .set-row .lb { font-size:12px; }
+.set-row > input[type=text] { width:100%; min-width:0; box-sizing:border-box; }
 .set-row .hint { margin-top:2px; }
 .set-row.bool .hint { margin-left:23px; }
 

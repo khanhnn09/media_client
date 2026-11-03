@@ -23,7 +23,7 @@ export function createSettingsPage(ctx) {
         card.append(h('div', { class: 'set-row bool' },
           h('div', null, h('label', { class: 'chk' }, ctl, f.label), f.hint && h('div', { class: 'hint' }, f.hint))));
       } else {
-        ctl = h('input', { type: 'text', style: { width: f.type === 'list' ? '260px' : '200px' } });
+        ctl = h('input', { type: 'text' });
         card.append(h('div', { class: 'set-row' },
           h('div', null, h('div', { class: 'lb' }, f.label), f.hint && h('div', { class: 'hint' }, f.hint)), ctl));
       }
