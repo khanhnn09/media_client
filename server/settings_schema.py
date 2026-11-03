@@ -205,6 +205,8 @@ SETTINGS_TABS = [('Chung',
     'chắn.'),
    ('muse_image_timeout', 'Chờ ảnh tối đa (giây)', 'int', ''),
    ('muse_video_timeout', 'Chờ video tối đa (giây)', 'int', ''),
+   ('muse_resume_hours', 'Tự bật lại profile sau (giờ)', 'float',
+    'Profile bị tắt vì từ khóa lỗi (vd limit) sẽ tự bật lại sau số giờ này (mặc định 24). 0 = không tự bật lại, phải bật tay.'),
    ('muse_stop_keywords', 'Từ khóa lỗi tự tắt profile', 'list',
     'Lỗi của task Muse chứa một trong các từ này (không phân biệt hoa/thường) → tự tắt profile (enabled=0) và dừng worker. Phân cách bằng dấu phẩy, vd: limit, timeout. Để trống = không tự tắt.')])]
 

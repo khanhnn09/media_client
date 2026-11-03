@@ -149,7 +149,8 @@ def _clamp(settings: dict) -> dict:
             s['flow_block_slowdown_factor'] = _DEFAULT_SERVER_SETTINGS['flow_block_slowdown_factor']
 
     for k in ('step_delay_min_secs', 'step_delay_max_secs',
-              'thread_stagger_min_secs', 'thread_stagger_max_secs', 'upscale_gap_secs'):
+              'thread_stagger_min_secs', 'thread_stagger_max_secs', 'upscale_gap_secs',
+              'muse_resume_hours'):
         if k in s:
             try:
                 s[k] = max(0.0, float(s[k]))

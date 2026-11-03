@@ -168,6 +168,7 @@ _DEFAULT_SERVER_SETTINGS = {
     'muse_name_token':     1,    # kèm mã m<task_id> để gán kết quả về đúng task
     'muse_image_timeout':  300,  # giây chờ ảnh
     'muse_video_timeout':  600,  # giây chờ video
+    'muse_resume_hours':   24.0,   # tắt vì từ khóa lỗi → tự bật lại sau N giờ (0 = không tự bật)
     'muse_stop_keywords':  ['limit', 'timeout'],   # lỗi chứa từ khóa này → tự tắt profile
     # 2026-09-24: mở trình duyệt bằng CloakBrowser (luồng riêng server/cloak_browser.py)
     'use_cloakbrowser': 0,

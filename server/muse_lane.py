@@ -679,6 +679,14 @@ class MuseLane:
 
             def _do():
                 try:
+                    hrs = float(get_local_settings().get('muse_resume_hours') or 0)
+                    if hrs > 0:
+                        from . import muse_resume
+                        muse_resume.schedule(pid, hrs)
+                        self._log('info', f'⏳ Tự bật lại profile sau {hrs:g} giờ')
+                except Exception as e:
+                    self._log('warn', f'Hẹn giờ bật lại lỗi: {e}')
+                try:
                     pm.update(pid, enabled=0)
                 except Exception as e:
                     self._log('warn', f'Tắt profile lỗi: {e}')

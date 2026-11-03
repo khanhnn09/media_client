@@ -895,9 +895,28 @@ def _auto_scale_gemini_tick():
     _auto_scale_chat_worker_group('chatgpt', chatgpt_pending, max_conc, 'chatgpt')
 
 
+def _muse_resume_tick():
+    """Bật lại profile Muse đã bị tắt vì limit khi hết thời gian chờ."""
+    from . import muse_resume
+    for pid in muse_resume.due():
+        try:
+            p = pm.get(pid)
+            if p and not p.get('enabled'):
+                pm.update(pid, enabled=1)
+                log.info(f'[muse-resume] Bật lại profile {pid} sau thời gian chờ limit')
+        except Exception as e:
+            log.warning(f'[muse-resume] profile {pid}: {e}')
+            continue
+        muse_resume.cancel(pid)
+
+
 def _veo3_dispatcher_loop():
     while True:
         time.sleep(10)
+        try:
+            _muse_resume_tick()
+        except Exception as e:
+            log.warning(f'[muse-resume] tick error: {e}')
         try:
             _quiet_hours_tick()
         except Exception as e:
