@@ -1302,6 +1302,10 @@ class SeleniumFlowWorker:
             if fid and not self._FLOW_UUID_RE.match(fid):
                 self._log('warn', f'[flow-bind] Flow ID của project không hợp lệ: "{fid}" — bỏ qua gán')
                 fid = ''
+            if not fid and str(tasks[0].get('flowEmail') or '').strip():
+                # (2026-11-04) Project có email nhưng CHƯA có Flow ID → task đầu tiên:
+                # tự tạo project Flow trên tài khoản này rồi lưu id về project Nano Banana.
+                fid = self._provision_flow_project(tasks)
         cur = self._bound_url()
         if fid:
             url = f'{self._FLOW_PROJECT_BASE}/{fid}'
@@ -1321,6 +1325,50 @@ class SeleniumFlowWorker:
             self._log('info', '[flow-bind] Thôi chạy theo project đã gán — quay về project riêng của profile')
             self.profile['project_url'] = getattr(self, '_own_project_url', None) or ''
             self._bound_flow_url = ''
+
+    def _provision_flow_project(self, tasks: list) -> str:
+        """(2026-11-04) Project Nano Banana đã gán email + bật "chỉ chạy trên tài khoản
+        đã gán" nhưng chưa có Flow ID: vào https://flow.google.com/, bấm tạo dự án mới,
+        lấy id từ URL rồi báo backend lưu vào project (`/task/<id>/flow_project`).
+        Trả id (backend có thể trả id do máy khác vừa tạo trước) hoặc '' nếu thất bại —
+        khi đó lô chạy như chưa gán và lần heartbeat sau sẽ thử lại."""
+        email = str(tasks[0].get('flowEmail') or '').strip()
+        self._log('info', f'[flow-bind] Project chưa có Flow ID (email {email}) — tạo project Flow mới trên flow.google.com')
+        id_re = re.compile(r'/project/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})', re.I)
+        try:
+            if not self._ensure_google_login('https://flow.google.com/'):
+                self._log('error', '[flow-bind] Không đăng nhập được Google — không tạo được project Flow')
+                return ''
+            self._click_create_with_flow_if_present()
+            if not self._click_new_project_button(timeout=20):
+                self._log('error', '[flow-bind] Không thấy nút tạo dự án mới trên flow.google.com')
+                return ''
+            fid = ''
+            deadline = time.time() + 40
+            while time.time() < deadline and not fid:
+                self._sleep(2)
+                try:
+                    m = id_re.search(self.driver.current_url or '')
+                except Exception:
+                    m = None
+                if m:
+                    fid = m.group(1).lower()
+            if not fid:
+                self._log('error', '[flow-bind] Bấm tạo dự án nhưng URL không chuyển sang /project/<id>')
+                return ''
+            r = self._req('POST', f'{FLOW_SERVER}/api/media/task/{tasks[0]["id"]}/flow_project', timeout=30,
+                          body={'machineCode': self.machine_code, 'flowProjectId': fid}) or {}
+            saved = str((r.get('data') or r).get('flowProjectId') or '').strip().lower()
+            if not saved:
+                self._log('error', f'[flow-bind] Backend không lưu được Flow ID {fid}: {r}')
+                return ''
+            if saved != fid:
+                self._log('warn', f'[flow-bind] Máy khác đã tạo trước — dùng Flow ID {saved} thay vì {fid}')
+            self._log('ok', f'[flow-bind] ✔ Đã tạo + lưu project Flow {saved} cho project Nano Banana')
+            return saved
+        except Exception as e:
+            self._log('error', f'[flow-bind] Lỗi tạo project Flow: {e}')
+            return ''
 
     def _ensure_bound_flow_page(self):
         """Đưa trình duyệt vào ĐÚNG project Flow đã gán. KHÔNG tạo project mới —
