@@ -249,7 +249,7 @@ if (!window.__omniLib) window.__omniLib = (function(){
       var r2 = await fetch(up, {method:'PUT', credentials:'include', headers:{
           'X-Goog-Upload-Command':'upload, finalize','X-Goog-Upload-Offset':'0',
           'Content-Type':'application/x-www-form-urlencoded;charset=utf-8'}, body:u8});
-      var t = await r2.text(); var m = t.match(/"(AVL_[^"]+)"/);
+      var t = await r2.text(); var m = t.match(/"(AVL_[^"]+)"/) || (r2.ok ? t.match(/^\s*\[\s*"([^"]{20,})"/) : null);
       return m ? {blobId:m[1]} : {error:'upload finalize HTTP '+r2.status+': '+t.slice(0,200)};
     },
     // Bắn generate rồi return NGAY (không chờ ~30-60s) — kết quả đọc bằng poll().

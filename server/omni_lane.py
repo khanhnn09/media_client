@@ -116,8 +116,23 @@ def ensure_vids_doc(worker, log=None) -> str | None:
     if saved:
         if not worker._ensure_google_login(saved):
             return None
-        time.sleep(3)
-        cur = d.current_url or ''
+        # Tài liệu đã xoá/mất quyền thì Google chuyển sang trang trợ giúp SAU vài giây —
+        # kiểm tra 3s là không đủ, phải đứng chờ URL ổn định rồi mới tin.
+        cur = ''
+        for _ in range(10):
+            time.sleep(1)
+            cur = d.current_url or ''
+            if not ('/videos/' in cur and '/d/' in cur):
+                break
+            # Tài liệu đã xoá: URL giữ nguyên nhưng trang là "Không tìm thấy trang".
+            try:
+                txt = (d.execute_script("return (document.body&&document.body.innerText||'').slice(0,400)") or '').lower()
+            except Exception:
+                txt = ''
+            if any(s in txt for s in ('không tìm thấy trang', 'đã bị xóa', 'page not found',
+                                      'has been deleted', 'file you requested')):
+                cur = ''
+                break
         if '/videos/' in cur and '/d/' in cur:
             return cur
         log('warn', f'Tài liệu Vids đã nhớ không mở được ({cur[:80]}) — tạo tài liệu mới')
