@@ -383,11 +383,9 @@ export function createProfilesPage(ctx) {
     const byId = new Map(state.profiles.map((p) => [p.id, p]));
     const rows = [...state.checked].filter((i) => byId.has(i)).sort((a, b) => a - b).map((i) => byId.get(i));
     if (!rows.length) return;
-    const clean = (v) => String(v == null ? '' : v).replace(/[|	
-]+/g, ' ').trim();
+    const clean = (v) => String(v == null ? '' : v).replace(/[|\t\r\n]+/g, ' ').trim();
     const text = rows.map((p) => [p.profile_name, p.display_name, p.account_email, p.account_password,
-      p.worker_mode || 'api', p.proxy_server].map(clean).join(' | ')).join('
-');
+      p.worker_mode || 'api', p.proxy_server].map(clean).join(' | ')).join('\n');
     try { await navigator.clipboard.writeText(text); }
     catch (_) {
       const ta = h('textarea', { style: { position: 'fixed', opacity: 0 } }); ta.value = text;
