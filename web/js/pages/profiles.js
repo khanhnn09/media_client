@@ -276,6 +276,7 @@ export function createProfilesPage(ctx) {
       { label: '📜  Xem logs', onClick: () => ctx.go(2, id) },
       { label: '✏  Sửa profile', onClick: () => edit(p) },
       { label: '📋  Sao chép profile (chỉ thông số cài đặt)', onClick: () => clone(p) },
+      { label: '📄  Copy text — định dạng thêm nhiều', onClick: () => copyProfilesAsText([p]) },
       { label: '⏰  Xóa thời gian ngủ (đánh thức ngay)', disabled: !asleep, title: asleep ? '' : 'Profile không ở trạng thái ngủ', onClick: () => act(id, 'clear_sleep') },
       '-',
       { label: '🧹  Làm mới profile (xóa sạch — về trắng)', disabled: running || loginOpen,
@@ -379,9 +380,12 @@ export function createProfilesPage(ctx) {
 
   // Copy các profile đã chọn thành text đúng định dạng "Thêm nhiều profile":
   // tên | hiển thị | email | mật khẩu | loại | proxy  (mỗi dòng 1 profile; dán lại là thêm được ngay).
-  async function copySelectedAsText() {
+  function copySelectedAsText() {
     const byId = new Map(state.profiles.map((p) => [p.id, p]));
-    const rows = [...state.checked].filter((i) => byId.has(i)).sort((a, b) => a - b).map((i) => byId.get(i));
+    return copyProfilesAsText([...state.checked].filter((i) => byId.has(i)).sort((a, b) => a - b).map((i) => byId.get(i)));
+  }
+
+  async function copyProfilesAsText(rows) {
     if (!rows.length) return;
     const clean = (v) => String(v == null ? '' : v).replace(/[|\t\r\n]+/g, ' ').trim();
     const text = rows.map((p) => [p.profile_name, p.display_name, p.account_email, p.account_password,
