@@ -368,12 +368,32 @@ export function createProfilesPage(ctx) {
       { label: `✖  Đóng login browser (${n})`, onClick: () => bulk('close') },
       { label: `😴  Xóa thời gian ngủ (${n})`, onClick: () => bulk('clear_sleep') },
       { label: `🌐  Sửa proxy (${n})`, onClick: () => bulk('proxy') },
+      { label: `📋  Copy text — định dạng thêm nhiều (${n})`, onClick: copySelectedAsText },
       { label: `🟢  Bật auto (${n})`, onClick: () => bulk('auto_on') },
       { label: `⚪  Tắt auto (${n})`, onClick: () => bulk('auto_off') },
       '-',
       { label: `🧹  Làm mới profile — xóa sạch (${n})`, onClick: () => bulk('wipe') },
       { label: `🗑  Xóa profile (${n})`, onClick: () => bulk('delete') },
     ]);
+  }
+
+  // Copy các profile đã chọn thành text đúng định dạng "Thêm nhiều profile":
+  // tên | hiển thị | email | mật khẩu | loại | proxy  (mỗi dòng 1 profile; dán lại là thêm được ngay).
+  async function copySelectedAsText() {
+    const byId = new Map(state.profiles.map((p) => [p.id, p]));
+    const rows = [...state.checked].filter((i) => byId.has(i)).sort((a, b) => a - b).map((i) => byId.get(i));
+    if (!rows.length) return;
+    const clean = (v) => String(v == null ? '' : v).replace(/[|	
+]+/g, ' ').trim();
+    const text = rows.map((p) => [p.profile_name, p.display_name, p.account_email, p.account_password,
+      p.worker_mode || 'api', p.proxy_server].map(clean).join(' | ')).join('
+');
+    try { await navigator.clipboard.writeText(text); }
+    catch (_) {
+      const ta = h('textarea', { style: { position: 'fixed', opacity: 0 } }); ta.value = text;
+      document.body.append(ta); ta.select(); document.execCommand('copy'); ta.remove();
+    }
+    toast(`Đã copy ${rows.length} profile (gồm cả mật khẩu) — dán vào "Thêm nhiều profile"`, 'ok');
   }
 
   const BULK_TITLE = { open: 'Mở login browser', close: 'Đóng login browser', clear_sleep: 'Xóa thời gian ngủ', proxy: 'Sửa proxy',
