@@ -208,7 +208,7 @@ SETTINGS_TABS = [('Chung',
    ('muse_resume_hours', 'Tự bật lại profile sau (giờ)', 'float',
     'Profile bị tắt vì từ khóa lỗi (vd limit) sẽ tự bật lại sau số giờ này (mặc định 24). 0 = không tự bật lại, phải bật tay.'),
    ('muse_stop_keywords', 'Từ khóa lỗi tự tắt profile', 'list',
-    'Lỗi của task Muse chứa một trong các từ này (không phân biệt hoa/thường) → tự tắt profile (enabled=0) và dừng worker. Phân cách bằng dấu phẩy, vd: limit, timeout. Để trống = không tự tắt.')])]
+    'Lỗi của task Muse chứa một trong các từ này (không phân biệt hoa/thường) → tự tắt profile (enabled=0) và dừng worker. Phân cách bằng dấu phẩy, vd: limit, timeout, giới hạn sử dụng (Muse tiếng Việt báo "Bạn đã đạt đến giới hạn sử dụng" — không chứa chữ limit). Để trống = không tự tắt.')])]
 
 # Setting đang ẩn (bậc thang time-window tạm tắt ở worker._record_error).
 HIDDEN_FIELDS = [('error_window_minutes', 'Cửa sổ thời gian tính lỗi (phút)', 'int', ''),

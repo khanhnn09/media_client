@@ -169,7 +169,7 @@ _DEFAULT_SERVER_SETTINGS = {
     'muse_image_timeout':  300,  # giây chờ ảnh
     'muse_video_timeout':  600,  # giây chờ video
     'muse_resume_hours':   24.0,   # tắt vì từ khóa lỗi → tự bật lại sau N giờ (0 = không tự bật)
-    'muse_stop_keywords':  ['limit', 'timeout'],   # lỗi chứa từ khóa này → tự tắt profile
+    'muse_stop_keywords':  ['limit', 'timeout', 'giới hạn sử dụng'],   # lỗi chứa từ khóa này → tự tắt profile
     # 2026-09-24: mở trình duyệt bằng CloakBrowser (luồng riêng server/cloak_browser.py)
     'use_cloakbrowser': 0,
     'cloak_geoip':      1,   # = launch(geoip=True): múi giờ + ngôn ngữ + WebRTC theo IP proxy

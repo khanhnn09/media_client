@@ -38,6 +38,7 @@ import re
 import tempfile
 import threading
 import time
+import unicodedata
 from pathlib import Path
 
 from .cdp_tab import CdpTab, CdpError, debug_port_of
@@ -551,7 +552,30 @@ class MuseLane:
             text = self.tab.evaluate("document.body.innerText", timeout=30, await_promise=False) or ''
         except Exception:
             return {}
-        return find_refusals(text, list(ids))
+        out = find_refusals(text, list(ids))
+        # Tin trả lời chứa từ khóa dừng (vd "Bạn đã đạt đến giới hạn sử dụng") không mang câu từ chối
+        # nên find_refusals bỏ qua → chỉ được xét khi task hết giờ chờ. Bắt ngay tại đây.
+        rest = [i for i in ids if i not in out]
+        if rest and self._stop_keywords():
+            for tid, reply in find_replies(text, rest).items():
+                if self._stop_keyword_hit(reply):
+                    out[tid] = reply
+        return out
+
+    @staticmethod
+    def _norm(text: str) -> str:
+        return unicodedata.normalize('NFC', text or '').lower()
+
+    def _stop_keywords(self) -> list:
+        try:
+            raw = get_local_settings().get('muse_stop_keywords') or []
+        except Exception:
+            return []
+        return [k for k in (self._norm(str(x)).strip() for x in raw) if k]
+
+    def _stop_keyword_hit(self, text: str):
+        low = self._norm(text)
+        return next((k for k in self._stop_keywords() if k in low), None)
 
     def _replies(self, ids) -> dict:
         try:
@@ -668,9 +692,7 @@ class MuseLane:
         """Lỗi trả về chứa từ khóa trong `muse_stop_keywords` (vd limit, timeout) → TẮT profile này
         (enabled=0 + dừng worker) để auto-scale không tự mở lại tới khi bật tay."""
         try:
-            kws = [k.strip().lower() for k in (get_local_settings().get('muse_stop_keywords') or []) if str(k).strip()]
-            low = (text or '').lower()
-            hit = next((k for k in kws if k in low), None)
+            hit = self._stop_keyword_hit(text)
             if not hit or getattr(self, '_stop_triggered', False):
                 return
             self._stop_triggered = True
