@@ -21,7 +21,7 @@ from PyQt6.QtCore import QObject, QThread, QUrl, pyqtSignal, pyqtSlot
 from PyQt6.QtWebChannel import QWebChannel
 from PyQt6.QtWebEngineCore import QWebEnginePage
 from PyQt6.QtWebEngineWidgets import QWebEngineView
-from PyQt6.QtWidgets import QFileDialog, QMainWindow, QMessageBox
+from PyQt6.QtWidgets import QApplication, QFileDialog, QMainWindow, QMessageBox
 
 import selenium_flow as sf  # server thật — chạy embedded trong thread nền (xem dưới)
 
@@ -52,6 +52,15 @@ class Bridge(QObject):
     @pyqtSlot(str, result=str)
     def pickFolder(self, title: str) -> str:
         return QFileDialog.getExistingDirectory(self._win, title or 'Chọn thư mục') or ''
+
+    @pyqtSlot(str, result=bool)
+    def copyText(self, text: str) -> bool:
+        # QtWebEngine chặn navigator.clipboard / execCommand('copy') (không báo lỗi) → ghi qua Qt.
+        try:
+            QApplication.clipboard().setText(text or '')
+            return True
+        except Exception:
+            return False
 
     @pyqtSlot()
     def logout(self):

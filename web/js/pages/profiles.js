@@ -1,5 +1,5 @@
 import { h, clear, summarizeHours, fmtClock, truthy } from '../util.js';
-import { api } from '../api.js';
+import { api, hasBridge, bridgeCall } from '../api.js';
 import { badge, statCard, pageHeader, showMenu, confirmDialog, alertDialog, openModal, toast } from '../ui.js';
 import { openProfileForm } from './profile-form.js';
 import { openBulkAdd } from './bulk-add.js';
@@ -390,11 +390,18 @@ export function createProfilesPage(ctx) {
     const clean = (v) => String(v == null ? '' : v).replace(/[|\t\r\n]+/g, ' ').trim();
     const text = rows.map((p) => [p.profile_name, p.display_name, p.account_email, p.account_password,
       p.worker_mode || 'api', p.proxy_server].map(clean).join(' | ')).join('\n');
-    try { await navigator.clipboard.writeText(text); }
-    catch (_) {
-      const ta = h('textarea', { style: { position: 'fixed', opacity: 0 } }); ta.value = text;
-      document.body.append(ta); ta.select(); document.execCommand('copy'); ta.remove();
+    // Trong cửa sổ app (QtWebEngine) clipboard của trình duyệt bị chặn → ghi qua Qt (bridge).
+    let ok = hasBridge() && (await bridgeCall('copyText', text)) === true;
+    if (!ok) {
+      try { await navigator.clipboard.writeText(text); ok = true; }
+      catch (_) {
+        const ta = h('textarea', { style: { position: 'fixed', opacity: 0 } }); ta.value = text;
+        document.body.append(ta); ta.select();
+        try { ok = document.execCommand('copy'); } catch (_) { ok = false; }
+        ta.remove();
+      }
     }
+    if (!ok) { toast('Không copy được vào clipboard', 'err'); return; }
     toast(`Đã copy ${rows.length} profile (gồm cả mật khẩu) — dán vào "Thêm nhiều profile"`, 'ok');
   }
 
