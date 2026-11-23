@@ -25,7 +25,7 @@ def kill_stale_client_tool(port: int) -> str | None:
     nếu phát hiện process LẠ (không phải client_tool) đang giữ port — trường
     hợp này KHÔNG tự kill, để caller tự quyết định (báo lỗi rõ như hành vi cũ)."""
     try:
-        r = requests.get(f'http://127.0.0.1:{port}/api/selenium/health', timeout=2)
+        r = requests.get(f'http://127.0.0.1:{port}/api/selenium/health', timeout=8)
         # Chỉ status 200 là CHƯA ĐỦ để coi là client_tool — bất kỳ web server nào
         # trả 200 cho MỌI path (khá phổ biến, vd health-check catch-all) cũng sẽ
         # khớp nhầm. Verify thêm nội dung JSON đúng shape của CHÍNH route này

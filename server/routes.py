@@ -577,6 +577,12 @@ def patch_client_identity():
     return jsonify(set_client_name(name))
 
 
+@app.route('/api/selenium/ping', methods=['GET'])
+def ping():
+    """Kiểm tra server đã lên chưa — KHÔNG gọi backend (health thì có, có thể chậm)."""
+    return jsonify({'ok': True, 'port': PORT})
+
+
 @app.route('/api/selenium/health', methods=['GET'])
 def health():
     """`db_ok` (2026-07-17) — không còn tự kết nối DB để test; giờ nghĩa là

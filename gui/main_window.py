@@ -111,7 +111,7 @@ class MainWindow(QMainWindow):
         # Có process KHÁC đã chiếm port (1 bản client_tool chưa đóng hết, hoặc mở 2 lần) → từ chối mở
         # đè, báo rõ — mục tiêu là đúng 1 process duy nhất.
         try:
-            if requests.get(f'{API_BASE}/api/selenium/health', timeout=2).ok:
+            if requests.get(f'{API_BASE}/api/selenium/ping', timeout=5).ok:
                 self._server_failed.emit(
                     f'Port {sf.PORT} đã có process khác đang dùng (có thể còn 1 bản client_tool chưa đóng hết, '
                     f'hoặc đang mở 2 lần). Đóng process đó (Task Manager) rồi mở lại app này.')
@@ -130,19 +130,19 @@ class MainWindow(QMainWindow):
         self._server_thread = threading.Thread(target=_run, daemon=True, name='embedded-selenium-flow')
         self._server_thread.start()
 
-        for _ in range(40):
+        for _ in range(120):   # chờ tới 60s
             time.sleep(0.5)
             if self._server_start_error:
                 break
             try:
-                if requests.get(f'{API_BASE}/api/selenium/health', timeout=2).ok:
+                if requests.get(f'{API_BASE}/api/selenium/ping', timeout=5).ok:
                     self._server_ready.emit()
                     return
             except Exception:
                 pass
         self._server_failed.emit(
             self._server_start_error or
-            f'Server không phản hồi sau 20s khởi động (không có exception cụ thể — có thể do máy chậm, hoặc '
+            f'Server không phản hồi sau 60s khởi động (không có exception cụ thể — có thể do máy chậm, hoặc '
             f'port {sf.PORT} bị phần mềm khác chiếm giữ). Thử đóng hẳn app và mở lại; nếu vẫn vậy, kiểm tra '
             f'"netstat -ano | findstr :{sf.PORT}" xem process nào đang giữ port.')
 

@@ -40,6 +40,10 @@ CHROME_BINARY     = os.getenv('CHROME_BINARY', '').strip()
 import platform as _platform
 _IS_ARM = _platform.machine().lower() in ('aarch64', 'arm64', 'armv7l', 'armv8l')
 FLOW_SERVER       = os.getenv('FLOW_API_URL',            'http://localhost:13443')
+# Windows: 'localhost' phân giải ::1 TRƯỚC, mà server chỉ nghe IPv4 → MỖI request mất thêm ~2s
+# chờ IPv6 thất bại (đo thật: 2.06s vs 0.02s). Ép IPv4 cho URL local.
+import re as _re
+FLOW_SERVER = _re.sub(r'^(https?://)localhost(?=[:/]|$)', r'\g<1>127.0.0.1', FLOW_SERVER.strip())
 POLL_INTERVAL     = int(os.getenv('SELENIUM_POLL_SECS', 8))
 DEBUG             = os.getenv('DEBUG', 'false').lower() == 'true'
 # LOG_KEEP (2026-07-17) — đã bỏ, retention giờ do backend tự quản (`_LOG_KEEP` trong
