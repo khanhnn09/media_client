@@ -199,6 +199,11 @@ def _quiet_hours_tick():
 # ═════════════════════════════════════════════════════════════════════════════
 
 
+# Backend production trả pending_by_mode mất 7-10s (đo 2026-11-23) — timeout 8s cũ làm
+# phần lớn lần gọi hỏng, 3 lần hỏng liên tiếp thì coi backlog = 0 và không mở profile.
+_PENDING_HTTP_TIMEOUT = 30
+
+
 def _fetch_pending_by_mode() -> dict:
     """LƯU Ý (bug đã vá 2026-07-16): nếu FLOW_SERVER sập/không kết nối được, KHÔNG
     được tin cache cũ vô thời hạn — trước đây fallback trả thẳng
@@ -211,7 +216,7 @@ def _fetch_pending_by_mode() -> dict:
     if _pending_cache['data'] is not None and now - _pending_cache['fetched_at'] < _PENDING_CACHE_TTL:
         return _pending_cache['data']
     try:
-        r = req_lib.get(f'{FLOW_SERVER}/api/media/pending_by_mode', timeout=8)
+        r = req_lib.get(f'{FLOW_SERVER}/api/media/pending_by_mode', timeout=_PENDING_HTTP_TIMEOUT)
         data = r.json()
         if data.get('success'):
             _pending_cache['data'] = data
@@ -594,14 +599,24 @@ def _veo3_dispatcher_tick():
         email = (prof.get('account_email') or '').strip().lower()
         if email not in email_budget:
             src = _email_backlog(prof, pending)
+            omni_src = src.get('videoTotalOmni')
             email_budget[email] = {'image': src.get('imageTotal') or 0,
-                                   'video': src.get('videoTotal') or 0}
+                                   'video': src.get('videoTotal') or 0,
+                                   'omni': (src.get('videoTotal') or 0) if omni_src is None else omni_src}
         return email_budget[email]
 
     def _eb_take(prof: dict) -> bool:
+        # (2026-11-23) Làn Omni nhận video bất kể task_mode của làn VEO — profile gán
+        # email bật Omni cũng được ăn backlog Omni của email đó (trước chỉ xét task_mode
+        # → profile image_only + Omni không bao giờ được mở dù email có 500 video Omni).
         b = _eb(prof)
         tm_ = prof.get('task_mode') or 'all'
-        kinds = ['image'] if tm_ == 'image_only' else ['video'] if tm_ == 'video_only' else ['image', 'video']
+        if not _veo_on(prof):
+            kinds = []
+        else:
+            kinds = ['image'] if tm_ == 'image_only' else ['video'] if tm_ == 'video_only' else ['image', 'video']
+        if int(prof.get('omni_enabled') or 0):
+            kinds.append('omni')
         for k in kinds:
             if b[k] > 0:
                 b[k] -= 1
@@ -618,11 +633,11 @@ def _veo3_dispatcher_tick():
         if wm == 'muse':
             muse_budget -= 1           # profile loại Muse → ăn backlog Muse
             continue
+        if bind_enabled_for(running_profile) and wm in ('api', 'dom'):
+            _eb_take(running_profile)  # gán email → ăn backlog của email (kể cả chỉ Omni)
+            continue
         if wm in ('api', 'dom') and not _veo_on(running_profile):
             omni_budget -= 1           # chỉ Omni → ăn backlog Omni
-            continue
-        elif bind_enabled_for(running_profile) and wm in ('api', 'dom'):
-            _eb_take(running_profile)
             continue
         if wm == 'gemini_image':
             gemini_image_budget -= 1
@@ -661,10 +676,10 @@ def _veo3_dispatcher_tick():
             upscale_wait.append(profile)  # còn video cần upscale trên máy này — không cần ngân sách task
         elif wm == 'muse':
             muse_wait.append(profile)  # ngân sách Muse riêng
+        elif bind_enabled_for(profile) and wm in ('api', 'dom'):
+            bound_wait.append(profile)  # gán email → ngân sách theo email (kể cả chỉ Omni)
         elif wm in ('api', 'dom') and not _veo_on(profile):
             omni_wait.append(profile)  # chỉ Omni → ngân sách Omni riêng
-        elif bind_enabled_for(profile) and wm in ('api', 'dom'):
-            bound_wait.append(profile)
         elif wm == 'gemini_image':
             gemini_img_wait.append(profile)
         elif wm == 'gemini_video':
@@ -755,7 +770,7 @@ def _fetch_gemini_pending_count() -> dict:
     if _gemini_pending_cache['data'] is not None and now - _gemini_pending_cache['fetched_at'] < _GEMINI_PENDING_CACHE_TTL:
         return _gemini_pending_cache['data']
     try:
-        r = req_lib.get(f'{FLOW_SERVER}/api/gemini/pending_count', timeout=8)
+        r = req_lib.get(f'{FLOW_SERVER}/api/gemini/pending_count', timeout=_PENDING_HTTP_TIMEOUT)
         data = r.json()
         if data.get('success'):
             _gemini_pending_cache['data'] = data
