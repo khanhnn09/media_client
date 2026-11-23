@@ -86,8 +86,32 @@ def update_profile(pid):
 
 @app.route('/api/selenium/profiles/<int:pid>', methods=['DELETE'])
 def delete_profile(pid):
-    _stop_worker(pid)
-    pm.delete(pid, delete_data=request.args.get('deleteData') == 'true')
+    # Profile đang lỗi (worker kẹt, login browser treo, đang ngủ…) vẫn phải xoá được:
+    # mọi bước dọn dẹp là best-effort, chỉ lỗi ở bước xoá DB mới chặn — và trả JSON
+    # có lý do (trước đây exception → trang HTML 500, giao diện không đọc được).
+    try:
+        _stop_worker(pid)
+    except Exception as e:
+        log.warning(f'delete_profile {pid}: stop worker lỗi: {e}')
+    drv = _login_drivers.pop(pid, None)
+    if drv is not None:
+        try:
+            drv.quit()
+        except Exception:
+            pass
+    _state._desired_veo3.discard(pid)
+    _state._sleep_until_by_pid.pop(pid, None)
+    try:
+        from . import muse_resume
+        muse_resume.cancel(pid)
+    except Exception:
+        pass
+    try:
+        pm.delete(pid, delete_data=request.args.get('deleteData') == 'true')
+    except Exception as e:
+        return jsonify({'error': f'Xoá thất bại: {e}'}), 500
+    if pm.get(pid):
+        return jsonify({'error': 'Backend không xoá được profile này (có thể thuộc máy/tài khoản khác)'}), 409
     return jsonify({'ok': True})
 
 

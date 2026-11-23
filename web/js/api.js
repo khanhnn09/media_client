@@ -10,7 +10,9 @@ export async function api(method, path, body, { timeout = 15000 } = {}) {
       opt.headers['Content-Type'] = 'application/json';
     }
     const r = await fetch(path, opt);
-    return await r.json();
+    const txt = await r.text();
+    try { return JSON.parse(txt); }
+    catch (_) { return { error: `HTTP ${r.status}: ${txt.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200)}` }; }
   } finally {
     clearTimeout(t);
   }
