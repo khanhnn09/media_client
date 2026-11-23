@@ -285,6 +285,20 @@ log = logging.getLogger('selenium-flow')
 app = Flask(__name__)
 CORS(app)
 
+
+@app.errorhandler(Exception)
+def _api_error_as_json(e):
+    """Mọi lỗi chưa bắt ở route /api/ → JSON `{error}` kèm lý do thật (vd lỗi backend khi sửa
+    profile), thay vì trang HTML 500 khiến giao diện báo 'Unexpected token <'."""
+    from flask import jsonify, request
+    from werkzeug.exceptions import HTTPException
+    if isinstance(e, HTTPException):
+        if not request.path.startswith('/api/'):
+            return e
+        return jsonify({'error': f'{e.code} {e.name}: {e.description}'}), e.code
+    log.exception(f'Lỗi {request.method} {request.path}')
+    return jsonify({'error': str(e) or e.__class__.__name__}), 500
+
 # ── Per-profile logger ────────────────────────────────────────────────────────
 
 def _profile_log(profile_id: int, level: str, message: str):
